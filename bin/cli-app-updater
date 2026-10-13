@@ -1,0 +1,48 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use BuTing\CliAppUpdater\Updater;
+
+require isset($_composer_autoload_path) ? $_composer_autoload_path : dirname(__DIR__) . '/autoload.php';
+
+if ($argc !== 3 || !in_array($argv[1], ['client-key', 'status', 'report', 'authorize', 'check', 'download', 'update', 'rollback'], true)) {
+    fwrite(STDERR, "Usage: cli-app-updater <client-key|status|report|authorize|check|download|update|rollback> /absolute/path/config.php\n");
+    exit(2);
+}
+
+try {
+    $path = realpath($argv[2]);
+    if ($path === false || !is_file($path)) {
+        throw new RuntimeException('Configuration file does not exist');
+    }
+    $config = require $path;
+    if (!is_array($config)) {
+        throw new RuntimeException('Configuration must return an array');
+    }
+    $updater = new Updater($config);
+    $command = $argv[1];
+    if ($command === 'client-key') {
+        $result = ['client_key' => $updater->getClientKey()];
+    } elseif ($command === 'update') {
+        $result = $updater->update($config['hooks'] ?? []) ?? ['update' => false];
+    } elseif ($command === 'rollback') {
+        $updater->rollback($config['hooks'] ?? []);
+        $result = ['rolled_back' => true] + $updater->status();
+    } elseif ($command === 'check' || $command === 'download') {
+        $release = $updater->check();
+        $result = Updater::summary($release);
+        if ($command === 'download' && $release['update']) {
+            $result['downloaded_file'] = $updater->download($release);
+        }
+    } else {
+        $result = $updater->$command();
+        unset($result['license_value']);
+    }
+    echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+} catch (Throwable $error) {
+    // No stack traces, request headers, API responses or nested hook errors in routine CLI output.
+    fwrite(STDERR, $error->getMessage() . "\n");
+    exit(1);
+}

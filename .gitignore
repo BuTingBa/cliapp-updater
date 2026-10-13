@@ -1,0 +1,4 @@
+/vendor/
+/composer.lock
+/updater.local.php
+/.test-*/

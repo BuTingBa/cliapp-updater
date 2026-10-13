@@ -1,0 +1,20 @@
+{
+    "name": "buting/cliapp-updater",
+    "description": "Framework-independent PHP updater for the apps.cli.cc release and licensing service",
+    "type": "library",
+    "license": "proprietary",
+    "authors": [{"name": "BuTing"}],
+    "require": {
+        "php": "^7.4 || ^8.0",
+        "php-64bit": "*",
+        "ext-curl": "*",
+        "ext-hash": "*",
+        "ext-json": "*",
+        "ext-zip": "*"
+    },
+    "suggest": {"ext-sodium": "Required only for offline Ed25519 license verification"},
+    "autoload": {"psr-4": {"BuTing\\CliAppUpdater\\": "src/"}},
+    "bin": ["bin/cli-app-updater"],
+    "scripts": {"test": "@php tests/run.php"},
+    "archive": {"exclude": ["/tests", "/.github", "/.gitignore"]}
+}
