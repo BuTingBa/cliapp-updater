@@ -1,4 +1,6 @@
-# CliAppUpdater
+# cliapp-updater
+
+[GitHub](https://github.com/BuTingBa/cliapp-updater) · [Packagist](https://packagist.org/packages/buting/cliapp-updater)
 
 用于 apps.cli.cc 发布平台的 PHP 下载更新库。ThinkPHP/FPM、Webman、普通 PHP、队列和 CLI 共用同一套方法。后台按钮可直接调用 `update()`，同步完成检查、下载、校验、备份和文件覆盖，不要求客户登录服务器运行命令。
 
@@ -7,8 +9,12 @@
 ## 安装与最小调用
 
 ```sh
-composer require buting/cli-app-updater
+composer require buting/cliapp-updater:dev-main
 ```
+
+目前提供 `dev-main` 开发分支，适合接入验证；请提交应用的 composer.lock 固定实际安装的提交。稳定版本发布后可使用 `composer require buting/cliapp-updater`，或按已发布版本指定约束，不需要降低整个项目的 minimum-stability。
+
+Composer 包名是 `buting/cliapp-updater`，安装目录为 `vendor/buting/cliapp-updater`；PHP 命名空间仍为 `BuTing\CliAppUpdater`，可选命令入口仍为 `vendor/bin/cli-app-updater`。后两者与 Composer 包名不是同一项配置。
 
 ```php
 <?php

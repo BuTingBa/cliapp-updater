@@ -1,6 +1,11 @@
 {
     "name": "buting/cliapp-updater",
     "description": "Framework-independent PHP updater for the apps.cli.cc release and licensing service",
+    "homepage": "https://github.com/BuTingBa/cliapp-updater",
+    "support": {
+        "source": "https://github.com/BuTingBa/cliapp-updater",
+        "issues": "https://github.com/BuTingBa/cliapp-updater/issues"
+    },
     "type": "library",
     "license": "proprietary",
     "authors": [{"name": "BuTing"}],
