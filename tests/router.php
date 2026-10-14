@@ -16,8 +16,9 @@ if ($path === '/ready') {
     echo 'ready';
     return;
 }
+$action = $_GET['action'] ?? (json_decode(file_get_contents('php://input'), true)['action'] ?? '');
 $mode = $scenario['mode'] ?? '';
-if (strpos($path, '/api/packages/') === 0) {
+if ($action === 'download' || strpos($path, '/api/packages/') === 0) {
     if ($mode === 'download_redirect') {
         header('Location: /forbidden');
         return;
@@ -48,9 +49,9 @@ if ($mode === 'business_error') {
     echo '{"status":0,"error":"fixture-secret-value","data":[]}';
     return;
 }
-if (strpos($path, '/api/client/report/') === 0) {
+if ($action === 'report') {
     $data = ['registered' => true, 'client_id' => 1];
-} elseif (strpos($path, '/api/client/authorize/') === 0) {
+} elseif ($action === 'authorize') {
     $data = ['authorized' => true, 'license_value' => 'fixture-license'];
 } elseif ((int) ($_GET['version_code'] ?? 0) >= ($scenario['release']['version_code'] ?? 1)) {
     $data = ['update' => false, 'status_code' => 304];

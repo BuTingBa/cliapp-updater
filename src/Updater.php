@@ -81,14 +81,14 @@ final class Updater
     public function report(): array
     {
         return $this->locked(function (): array {
-            return $this->request('client/report', true);
+            return $this->request('report', true);
         });
     }
 
     public function authorize(): array
     {
         return $this->locked(function (): array {
-            return $this->request('client/authorize', true);
+            return $this->request('authorize', true);
         });
     }
 
@@ -153,7 +153,7 @@ final class Updater
 
     private function checkUpdate(): array
     {
-        $release = $this->request('upgrade/check', false);
+        $release = $this->request('check', false);
         if (!isset($release['update']) || !is_bool($release['update'])) {
             throw new RuntimeException('Missing update flag');
         }
@@ -190,7 +190,7 @@ final class Updater
         if ($available === false || $available < $package['file_size'] + 16777216) {
             throw new RuntimeException('Insufficient free disk space for package download');
         }
-        $this->http->download($package['file_url'], $part, $package['file_size'], $package['sha256']);
+        $this->http->download($package['file_url'], $part, $package['file_size'], $package['sha256'], $this->config['product_code']);
         $path = substr($part, 0, -5) . '.zip';
         if (!rename($part, $path)) {
             unlink($part);
@@ -207,13 +207,13 @@ final class Updater
             $headers['Upgrade-Token'] = $this->config['upgrade_token'];
         }
         $data = [
-            'version_code' => $state['version_code'], 'platform' => 'php', 'channel' => $this->config['channel'],
+            'action' => $route, 'version_code' => $state['version_code'], 'platform' => 'php', 'channel' => $this->config['channel'],
             'domain' => $this->config['domain'], 'os_info' => ['system' => PHP_OS_FAMILY, 'php' => PHP_VERSION],
         ];
         if ($this->config['client_name'] !== '') {
             $data['client_name'] = $this->config['client_name'];
         }
-        return $this->http->request('/api/' . $route . '/' . rawurlencode($this->config['product_code']), $headers, $data, $post);
+        return $this->http->request('/api/' . rawurlencode($this->config['product_code']), $headers, $data, $post);
     }
 
     private function state(): array

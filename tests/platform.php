@@ -39,7 +39,7 @@ try {
     foreach (['product' => ['secret_key'], 'release_package' => ['sha256', 'requirements'], 'upgrade_license' => ['binding_client', 'verification_mode']] as $table => $columns) {
         verify(!array_diff($columns, array_column(Db::query('SHOW COLUMNS FROM ' . $table), 'Field')), 'Current live schema supports updater protocol');
     }
-    $uid = (int) Db::name('developer')->insertGetId([
+    $uid = (int) Db::name('user')->insertGetId([
         'email' => $tag . '@example.invalid', 'nickname' => $tag,
         'password' => password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT), 'is_root' => 0,
     ]);
@@ -162,14 +162,16 @@ try {
             foreach (['upgrade_log', 'upgrade_license', 'release_version'] as $table) {
                 Db::name($table)->where('product_id', $productId)->delete();
             }
-            Db::name('product')->where('developer_id', $uid)->delete();
+            Db::name('product')->where('user_id', $uid)->delete();
             foreach (['stored_file', 'client', 'config'] as $table) {
-                Db::name($table)->where('developer_id', $uid)->delete();
+                Db::name($table)->where('user_id', $uid)->delete();
             }
-            Db::name('developer')->where('id', $uid)->delete();
+            Db::name('traffic_download')->where('user_id', $uid)->delete();
+            Db::name('traffic_month')->where('user_id', $uid)->delete();
+            Db::name('user')->where('id', $uid)->delete();
         });
         Files::removeTree($server . '/upload/packages/' . $uid);
-        verify(Db::name('developer')->where('id', $uid)->count() === 0, 'Temporary developer and related records cleaned');
+        verify(Db::name('user')->where('id', $uid)->count() === 0, 'Temporary developer and related records cleaned');
     }
     Files::removeTree($directory);
 }

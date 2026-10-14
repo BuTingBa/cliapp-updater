@@ -60,7 +60,7 @@ function scenario(string $mode = '', array $overrides = []): void
         'package' => [
             'package_type' => 1, 'platform' => 'php', 'file_name' => 'app.zip',
             'file_size' => filesize($directory . '/package.zip'), 'sha256' => hash_file('sha256', $directory . '/package.zip'),
-            'file_url' => '/api/packages/1/download/' . str_repeat('a', 64),
+            'file_url' => '/api/' . rawurlencode('app.%2F+\\测试') . '?action=download&package_id=1&ticket=' . str_repeat('a', 64),
             'file_full_url' => 'https://untrusted.invalid/never-used', 'requirements' => 'PHP >= 7.4',
             'config' => '{"command":"must not execute"}',
         ],
@@ -158,8 +158,8 @@ try {
     expect($updater->authorize()['authorized'] === true, 'Authorize works');
     $release = $updater->check();
     $request = Files::json($directory . '/request.json');
-    expect($request['path'] === '/api/upgrade/check/' . rawurlencode($config['product_code']), 'Product code encoded exactly once');
-    expect($request['query']['platform'] === 'php' && $request['query']['os_info']['php'] === PHP_VERSION, 'Canonical target and PHP environment');
+    expect($request['path'] === '/api/' . rawurlencode($config['product_code']), 'Product code encoded exactly once');
+    expect($request['query']['action'] === 'check' && $request['query']['platform'] === 'php' && $request['query']['os_info']['php'] === PHP_VERSION, 'Canonical target and PHP environment');
     expect($request['product_key'] === 'fixture-key' && $request['upgrade_token'] === 'fixture-token'
         && $request['client_key'] === $initial['client_key'], 'Credential headers follow platform contract');
     $download = $updater->download($release);

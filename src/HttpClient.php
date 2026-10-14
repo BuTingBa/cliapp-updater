@@ -54,10 +54,12 @@ final class HttpClient
         return $response['data'];
     }
 
-    public function download(string $path, string $destination, int $size, string $sha256): void
+    public function download(string $path, string $destination, int $size, string $sha256, ?string $productCode = null): void
     {
         // Ignore file_full_url: the platform's relative ticket route stays on the configured origin.
-        if (!preg_match('~^/api/packages/[1-9][0-9]*/download/[a-f0-9]{64}$~D', $path)) {
+        $unified = $productCode !== null && preg_match('~^/api/' . preg_quote(rawurlencode($productCode), '~')
+            . '\?action=download&package_id=[1-9][0-9]*&ticket=[a-f0-9]{64}$~D', $path);
+        if (!$unified && !preg_match('~^/api/packages/[1-9][0-9]*/download/[a-f0-9]{64}$~D', $path)) {
             throw new RuntimeException('Invalid download ticket path');
         }
         $output = fopen($destination, 'xb');

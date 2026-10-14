@@ -352,3 +352,9 @@ php vendor/bin/cli-app-updater rollback /srv/private/updater.php
 - [完整CLI演示](examples/demo.php)：主要操作与回调位置。
 - [精简检查示例](examples/updater.php)：初始化、检查、读取client_key。
 - [共享配置](examples/config.php)：带中文注释的配置。
+
+## 中央接口版本
+
+本版本使用中心 v0.13 的固定产品入口 `/api/{product_code}`，action 参数选择 report、authorize、check、download；PHP 包查询明确提交 platform=php、version_code 和 channel。配置的 base_url 仍是可信中心站点地址，已有 client_key 和状态文件不变。
+
+下载只接受同产品的相对票据 URL（兼容旧票据路径），忽略 file_full_url，拒绝跨产品地址及跳转。中心在每次下载时复查授权和所属用户的月流量额度；403 不应无限重试。先升级中心，再更新客户端库。本地版本尚未自动发布到 GitHub/Packagist。
