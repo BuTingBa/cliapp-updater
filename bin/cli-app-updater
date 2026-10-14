@@ -7,8 +7,8 @@ use BuTing\CliAppUpdater\Updater;
 
 require isset($_composer_autoload_path) ? $_composer_autoload_path : dirname(__DIR__) . '/autoload.php';
 
-if ($argc !== 3 || !in_array($argv[1], ['client-key', 'status', 'report', 'authorize', 'check', 'download', 'update', 'rollback'], true)) {
-    fwrite(STDERR, "Usage: cli-app-updater <client-key|status|report|authorize|check|download|update|rollback> /absolute/path/config.php\n");
+if ($argc !== 3 || !in_array($argv[1], ['client-key', 'status', 'report', 'authorize', 'check', 'changelog', 'download', 'update', 'rollback'], true)) {
+    fwrite(STDERR, "Usage: cli-app-updater <client-key|status|report|authorize|check|changelog|download|update|rollback> /absolute/path/config.php\n");
     exit(2);
 }
 

@@ -59,6 +59,9 @@ try {
             $result = $updater->authorize();
             unset($result['license_value']); // 在线凭证不输出到终端日志。
             break;
+        case 'changelog':
+            $result = $updater->changelog();
+            break;
         case 'check':
         case 'download':
             $release = $updater->check(); // 自动初始化 ID，并向平台报告当前版本。

@@ -101,6 +101,17 @@ final class Updater
         });
     }
 
+    /** Published notes relative to the installed version; never obtains a download ticket. */
+    public function changelog(string $direction = 'after', int $page = 1, int $size = 10): array
+    {
+        if (!in_array($direction, ['after', 'before'], true) || $page < 1 || $page > 1000000 || $size < 1 || $size > 100) {
+            throw new InvalidArgumentException('Expected direction after/before, page 1–1000000 and size 1–100');
+        }
+        return $this->locked(function () use ($direction, $page, $size): array {
+            return $this->request('changelog', false, ['direction' => $direction, 'page' => $page, 'size' => $size]);
+        });
+    }
+
     /** Download only, without changing the installed version. */
     public function download(array $release): string
     {
@@ -199,7 +210,7 @@ final class Updater
         return $path;
     }
 
-    private function request(string $route, bool $post): array
+    private function request(string $route, bool $post, array $parameters = []): array
     {
         $state = $this->state();
         $headers = ['Product-Key' => $this->config['product_key'], 'Client-Key' => $state['client_key']];
@@ -213,7 +224,7 @@ final class Updater
         if ($this->config['client_name'] !== '') {
             $data['client_name'] = $this->config['client_name'];
         }
-        return $this->http->request('/api/' . rawurlencode($this->config['product_code']), $headers, $data, $post);
+        return $this->http->request('/api/' . rawurlencode($this->config['product_code']), $headers, $data + $parameters, $post);
     }
 
     private function state(): array

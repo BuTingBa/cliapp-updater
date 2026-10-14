@@ -63,7 +63,7 @@ $data = $handler($updater, 'update');            // 同步执行，完成后返�
 return json(['success' => true, 'data' => $data]); // 使用所在框架的响应方法。
 ```
 
-[examples/http.php](examples/http.php) 支持 `check`、`update`、`rollback`、`status`、`client-key`。它只返回函数，直接访问文件不会安装。示例返回的 `updated` / `rolled_back` 是展示字段，与下文库方法的原始返回值不同。异常由应用统一处理，不向浏览器返回密钥、完整堆栈或磁盘路径。
+[examples/http.php](examples/http.php) 支持 `check`、`changelog`、`update`、`rollback`、`status`、`client-key`。它只返回函数，直接访问文件不会安装。示例返回的 `updated` / `rolled_back` 是展示字段，与下文库方法的原始返回值不同。异常由应用统一处理，不向浏览器返回密钥、完整堆栈或磁盘路径。
 
 前端等待返回，期间禁用重复点击并显示“正在更新”。超时、断网或页面关闭表示**结果尚未确认**，不能据此认定安装失败，也不要自动重试或自动恢复。
 
@@ -192,6 +192,19 @@ HTTPS始终校验证书，不跟随重定向。下载仅接受受限相对票据
 | `license_mode` | int | 平台下载模式：1授权、2公开 |
 
 不安装文件，也不自动保存返回凭证到配置。
+
+### `changelog(string $direction = 'after', int $page = 1, int $size = 10): array`
+
+查询相对于本地已安装 version_code 的更新日志。after为之后，before为之前，均不包含当前版本；默认之后。page为1–1000000，size为1–100，结果按版本序号倒序。无结果时list为空。
+
+~~~php
+$notes = $updater->changelog();
+$older = $updater->changelog('before', 1, 10);
+~~~
+
+返回list/total/page/size/direction/current_version_code；每条含version/version_code/changelog/published_at/channel。复用产品与实例凭据、渠道、域名和授权，范围与check一致，不包含草稿、撤回或超出订阅截止的版本。需要中心v0.13.1。长日志建议保持较小size，HTTP响应仍有2MiB上限。
+
+只查询元数据，不下载、不改变本地安装版本、不消耗包流量；首次调用可能初始化状态并登记客户端，仍受更新器锁保护。需要任意显示版本定位时可直接调用中心action=changelog&version=10.15。不要直接将日志内容作为可信HTML插入页面。
 
 ### `check(): array`
 
@@ -346,7 +359,7 @@ php vendor/bin/cli-app-updater rollback /srv/private/updater.php
 
 配置文件return数组，与构造配置一致；CLI专用可另加hooks数组。PHP API需把hooks单独传给update/rollback，放进构造配置不能代替方法参数。
 
-支持client-key/status/report/authorize/check/download/update/rollback，输出JSON；退出码0成功/无更新，1失败，2参数错误。
+支持client-key/status/report/authorize/check/changelog/download/update/rollback，输出JSON；退出码0成功/无更新，1失败，2参数错误。
 
 - [HTTP处理函数](examples/http.php)：后台检查、升级、恢复及注释。
 - [完整CLI演示](examples/demo.php)：主要操作与回调位置。

@@ -49,7 +49,11 @@ if ($mode === 'business_error') {
     echo '{"status":0,"error":"fixture-secret-value","data":[]}';
     return;
 }
-if ($action === 'report') {
+if ($action === 'changelog') {
+    $data = ['list' => [array_intersect_key($scenario['release'], array_flip(['version', 'version_code', 'changelog', 'published_at']))],
+        'total' => 1, 'page' => (int) $_GET['page'], 'size' => (int) $_GET['size'],
+        'direction' => $_GET['direction'], 'current_version_code' => (int) $_GET['version_code']];
+} elseif ($action === 'report') {
     $data = ['registered' => true, 'client_id' => 1];
 } elseif ($action === 'authorize') {
     $data = ['authorized' => true, 'license_value' => 'fixture-license'];

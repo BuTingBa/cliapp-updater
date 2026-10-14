@@ -17,6 +17,8 @@ return static function (Updater $updater, string $action, array $hooks = []): ar
         case 'check':
             // 去掉平台响应中的授权凭证、下载票据，只把版本摘要交给浏览器。
             return Updater::summary($updater->check());
+        case 'changelog':
+            return $updater->changelog();
         case 'update':
             // 同步等待检查、下载、校验、备份与文件覆盖；不启动命令/子进程。
             $result = $updater->update($hooks);

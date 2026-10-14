@@ -162,6 +162,15 @@ try {
     expect($request['query']['action'] === 'check' && $request['query']['platform'] === 'php' && $request['query']['os_info']['php'] === PHP_VERSION, 'Canonical target and PHP environment');
     expect($request['product_key'] === 'fixture-key' && $request['upgrade_token'] === 'fixture-token'
         && $request['client_key'] === $initial['client_key'], 'Credential headers follow platform contract');
+    $notes = $updater->changelog();
+    $request = Files::json($directory . '/request.json');
+    expect($notes['direction'] === 'after' && $notes['current_version_code'] === 0, 'Changelog defaults to installed version and after');
+    expect($request['query']['action'] === 'changelog' && $request['product_key'] === 'fixture-key', 'Changelog uses shared API and identity headers');
+    expect(!isset($notes['list'][0]['package'], $notes['list'][0]['license_value']), 'Changelog contains no download credentials');
+    expect($updater->changelog('before', 2, 5)['page'] === 2, 'Changelog pagination and direction forwarded');
+    rejects(static function () use ($updater): void { $updater->changelog('unknown'); }, 'Invalid direction rejected');
+    rejects(static function () use ($updater): void { $updater->changelog('after', 0); }, 'Invalid page rejected');
+    rejects(static function () use ($updater): void { $updater->changelog('after', 1, 101); }, 'Invalid size rejected');
     $download = $updater->download($release);
     expect(hash_file('sha256', $download) === $release['package']['sha256'], 'Real HTTP streaming download verified');
     $request = Files::json($directory . '/request.json');

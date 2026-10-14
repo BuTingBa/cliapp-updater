@@ -1,5 +1,11 @@
 # 更新日志
 
+## v0.13.1.202610141542
+
+- 增加changelog(direction='after',page=1,size=10)，相对已安装版本查询日志；支持before方向，使用中心v0.13.1的action=changelog。
+- CLI新增changelog，HTTP处理函数和完整示例同步；保留身份/锁/安装保护与check原契约。
+- PHP8.4通过149项、PHP7.4通过143项（签名因本机缺sodium跳过），真实平台及CLI联调27项。未发布远端标签。
+
 ## v0.13.0.202610141331
 
 - 中心 v0.13 对接使用固定 /api/{product_code}，以 action 选择登记、授权、检查与下载；PHP目标由参数显式提交。

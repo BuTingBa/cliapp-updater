@@ -100,6 +100,10 @@ try {
     verify($updater->authorize()['authorized'], 'Online license validates through real API');
     $release = $updater->check();
     verify($release['update'] && $release['package']['platform'] === 'php', 'Real API response matches package contract');
+    $notes = $updater->changelog();
+    verify($notes['total'] === 1 && $notes['list'][0]['version'] === '1.0.0' && $notes['current_version_code'] === 0, 'Real changelog matches installed version');
+    verify($updater->changelog('before')['list'] === [], 'Real earlier history excludes later releases');
+    verify(!isset($notes['list'][0]['package']), 'Real changelog issues no ticket');
     $file = $updater->download($release);
     verify(hash_file('sha256', $file) === $upload['sha256'], 'Real ticket delivers original package bytes');
     unlink($file);
@@ -115,7 +119,7 @@ try {
     verify(file_get_contents($root . '/index.php') === 'old' && $updater->status()['version_code'] === 0, 'Real update file recovery succeeds');
     $cliConfig = $directory . '/cli.php';
     Files::write($cliConfig, '<?php return ' . var_export($config, true) . ';');
-    foreach (['client-key', 'update', 'rollback'] as $command) {
+    foreach (['client-key', 'changelog', 'update', 'rollback'] as $command) {
         $client = proc_open([getenv('UPDATER_TEST_PHP') ?: PHP_BINARY, dirname(__DIR__) . '/bin/cli-app-updater', $command, $cliConfig],
             [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $clientPipes);
         fclose($clientPipes[0]);
