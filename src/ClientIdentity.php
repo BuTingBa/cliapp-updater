@@ -11,7 +11,8 @@ final class ClientIdentity
     {
         if (PHP_OS_FAMILY === 'Linux') {
             foreach (['/etc/machine-id', '/var/lib/dbus/machine-id'] as $path) {
-                if (is_readable($path)) {
+                // open_basedir 可禁止读取系统ID；此时沿用持久随机身份，不让探测警告中断更新。
+                if (@is_readable($path)) {
                     $value = trim((string) @file_get_contents($path, false, null, 0, 128));
                     if (preg_match('/^[a-f0-9]{32}$/iD', $value) && $value !== str_repeat('0', 32)) {
                         return strtolower($value);

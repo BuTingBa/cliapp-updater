@@ -61,8 +61,8 @@ final class Updater
         }
         $this->root = Files::directory($config['project_dir']);
         $this->work = Files::directory($config['work_dir']);
-        if (Files::within($this->work, $this->root) || Files::within($this->root, $this->work)) {
-            throw new InvalidArgumentException('work_dir and project_dir must be separate directories, neither inside the other');
+        if (Files::within($this->root, $this->work)) {
+            throw new InvalidArgumentException('work_dir cannot equal or contain project_dir');
         }
         $this->http = new HttpClient($config['base_url'], $this->config['http']);
         $this->installer = new Installer($this->root, $this->work, $this->config['preserve'], $this->config['archive_limits']);
@@ -190,7 +190,7 @@ final class Updater
     public static function summary(array $release): array
     {
         return array_intersect_key($release, array_flip(['update', 'status_code', 'version', 'version_code', 'changelog', 'published_at']))
-            + ['requirements' => $release['package']['requirements'] ?? ''];
+            + ['force_update' => ($release['force_update'] ?? false) === true, 'requirements' => $release['package']['requirements'] ?? ''];
     }
 
     private function checkUpdate(): array

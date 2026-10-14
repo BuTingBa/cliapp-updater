@@ -24,6 +24,10 @@ final class Installer
         $this->root = $root;
         $this->work = $work;
         $this->preserve = array_merge(['.git', '.env', '.user.ini', 'runtime', 'storage', 'upload', 'uploads', 'public/upload', 'public/uploads', 'public/storage'], $preserve);
+        // 工作目录可放在项目内；状态、锁、下载和备份永远不参与覆盖或清理。
+        if (Files::within($work, $root)) {
+            $this->preserve[] = substr($work, strlen(rtrim($root, '/')) + 1);
+        }
         foreach ($this->preserve as $path) {
             Files::relative($path);
         }

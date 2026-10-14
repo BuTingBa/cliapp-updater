@@ -64,7 +64,7 @@ function scenario(string $mode = '', array $overrides = []): void
 {
     global $directory;
     Files::writeJson($directory . '/scenario.json', ['mode' => $mode, 'release' => array_replace_recursive([
-        'update' => true, 'status_code' => 200, 'version' => '1.0.0', 'version_code' => 1,
+        'update' => true, 'force_update' => true, 'status_code' => 200, 'version' => '1.0.0', 'version_code' => 1,
         'changelog' => 'fixture', 'published_at' => '2026-10-01 12:00:00', 'license_value' => 'fixture-license',
         'package' => [
             'package_type' => 1, 'platform' => 'php', 'file_name' => 'app.zip',
@@ -94,6 +94,7 @@ try {
     Files::write($root . '/public/uploads/customer.txt', 'customer-data');
     Files::write($root . '/config/local.php', 'local-config');
     package(['index.php' => 'new-code', 'nested/new.php' => 'new-file', '.env' => 'replace-forbidden',
+        'private-updater/state.json' => 'replace-forbidden', 'private-updater/keep.txt' => 'replace-forbidden',
         'public/uploads/customer.txt' => 'replace-forbidden', 'config/local.php' => 'replace-forbidden']);
     $socket = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
     $address = stream_socket_get_name($socket, false);
@@ -117,7 +118,7 @@ try {
     expect($ready, 'Fixture HTTP server starts');
     $config = [
         'base_url' => 'http://' . $address, 'product_code' => 'app.%2F+\\测试', 'product_key' => 'fixture-key',
-        'upgrade_token' => 'fixture-token', 'project_dir' => $root, 'work_dir' => $directory . '/state',
+        'upgrade_token' => 'fixture-token', 'project_dir' => $root, 'work_dir' => $root . '/private-updater',
         'domain' => 'Example.COM.', 'client_name' => 'Fixture instance', 'preserve' => ['config/local.php'],
         'machine_id' => 'fixture-machine-a',
         'http' => ['allow_http' => true],
@@ -126,9 +127,24 @@ try {
         new Updater(array_replace($config, ['http' => []]));
     }, 'HTTP requires explicit opt-in');
     rejects(static function () use ($config, $root): void {
-        new Updater(array_replace($config, ['work_dir' => $root . '/unsafe']));
-    }, 'Work directory cannot be inside updated project');
+        new Updater(array_replace($config, ['work_dir' => $root]));
+    }, 'Work directory cannot equal project');
+    rejects(static function () use ($config, $directory): void {
+        new Updater(array_replace($config, ['work_dir' => $directory]));
+    }, 'Work directory cannot contain project');
     $updater = new Updater($config);
+    Files::write($config['work_dir'] . '/keep.txt', 'private-data');
+    // 子进程加载库后将文件访问限制到应用目录，真实下载、安装和恢复均不需要父目录权限。
+    $restricted = 'foreach (glob(' . var_export(dirname(__DIR__) . '/src/*.php', true) . ') as $file) { require_once $file; } '
+        . '$config = ' . var_export($config, true) . '; ini_set("open_basedir", $config["project_dir"]); '
+        . '$u = new \\BuTing\\CliAppUpdater\\Updater($config); $u->update(); $u->rollback(); echo "restricted-ok";';
+    $restrictedProcess = testProcess([PHP_BINARY, '-r', $restricted], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $restrictedPipes, $root);
+    fclose($restrictedPipes[0]);
+    $restrictedOutput = stream_get_contents($restrictedPipes[1]);
+    $restrictedError = stream_get_contents($restrictedPipes[2]);
+    fclose($restrictedPipes[1]);
+    fclose($restrictedPipes[2]);
+    expect(proc_close($restrictedProcess) === 0 && $restrictedOutput === 'restricted-ok' && $restrictedError === '', 'Update and rollback work with project-only open_basedir');
     expect($updater->check()['update'], 'check initializes the installation without a preceding status call');
     $lastRequest = file_get_contents($directory . '/request.json');
     $clientKey = $updater->getClientKey();
@@ -173,6 +189,8 @@ try {
     expect($request['body']['domain'] === 'example.com' && $request['method'] === 'POST', 'Report normalizes domain and sends JSON');
     expect($updater->authorize()['authorized'] === true, 'Authorize works');
     $release = $updater->check();
+    expect(Updater::summary($release)['force_update'] === true, 'Safe summary retains forced-update metadata');
+    expect(Updater::summary(['update' => false])['force_update'] === false, 'Older server metadata defaults to non-forced');
     $request = Files::json($directory . '/request.json');
     expect($request['path'] === '/api/' . rawurlencode($config['product_code']), 'Product code encoded exactly once');
     expect($request['query']['action'] === 'check' && $request['query']['platform'] === 'php' && $request['query']['os_info']['php'] === PHP_VERSION, 'Canonical target and PHP environment');
@@ -208,10 +226,12 @@ try {
         && file_get_contents($root . '/public/uploads/customer.txt') === 'customer-data'
         && file_get_contents($root . '/config/local.php') === 'local-config', 'Default and configured persistent paths preserved');
     expect($updater->status()['version_code'] === 1 && is_file($installed['backup_dir'] . '/manifest.json'), 'Commit records version and backup');
+    expect(file_get_contents($config['work_dir'] . '/keep.txt') === 'private-data', 'Nested custom work directory automatically protected');
     expect($updater->update() === null, 'Same resident object rereads state and sees no update');
     $updater->rollback();
     expect(file_get_contents($root . '/index.php') === 'old-code' && !file_exists($root . '/nested'), 'Rollback restores old code and removes new files/directories');
     expect($updater->status()['version_code'] === 0, 'Rollback restores previous version');
+    expect(file_get_contents($config['work_dir'] . '/keep.txt') === 'private-data', 'Nested work directory survives rollback');
     $updater->rollback();
     expect($updater->status()['transaction_status'] === 'rolled_back', 'Repeated rollback is idempotent');
     rejects(static function () use ($updater): void {

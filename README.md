@@ -39,7 +39,7 @@ $updater = new Updater([
     'product_code' => 'my-shop',
     'product_key' => getenv('UPDATER_PRODUCT_KEY'),
     'project_dir' => __DIR__,
-    'work_dir' => dirname(__DIR__) . '/my-shop-updater',
+    'work_dir' => __DIR__ . '/.updater',
     'version_code' => 100,
     'domain' => 'shop.example.com',
     'preserve' => ['config/local.php', 'public/customer-files'],
@@ -75,7 +75,7 @@ $result = $updater->update();
 | `product_code` | string | 必填 | 中心产品 Code，不是数据库 ID；由库编码为 URL 路径 |
 | `product_key` | string | 必填 | 产品通信密钥，发送到 `Product-Key` 请求头 |
 | `project_dir` | string | 必填 | 被更新的应用根目录，必须已存在；建议绝对路径 |
-| `work_dir` | string | 必填 | 独立持久工作目录，可自动创建；与 `project_dir` 互不包含 |
+| `work_dir` | string | 必填 | 私有持久工作目录，可自动创建；允许位于项目内，不能等于或包含项目根目录 |
 | `version_code` | int | `0` | 首次初始化时的已安装版本序号，范围 `0`～`9007199254740991`；已有状态后以状态为准 |
 | `client_key` | string | `''` | 安装实例 ID；空串自动生成。显式值为 8～64 位字母、数字、下划线或短横线，须与已有状态一致 |
 | `machine_id` | string\|null | `null` | `null` 自动探测系统 ID；非空串提供最多 512 字节的稳定实例 ID；`''` 禁用探测并使用持久随机 ID |
@@ -131,21 +131,24 @@ $config['archive_limits'] = [
 ### 目录布局与持久状态
 
 ```text
-/srv/shop/
-├── app/                    project_dir：应用根目录
-│   ├── app/
-│   ├── public/              Web 根目录
-│   ├── vendor/
-│   └── .env
-└── updater/                work_dir：不对 Web 开放
-    ├── state.json          实例 ID、已安装版本与文件基准
-    ├── update.lock         跨进程排他锁
-    ├── transaction.json    最近文件事务
-    ├── downloads/          下载文件
-    └── backups/            回滚备份
+/srv/shop/app/              project_dir：应用根目录
+├── app/
+├── public/                Web 入口目录
+├── vendor/
+├── .env
+└── .updater/              work_dir：私有持久目录，禁止运行缓存清理删除
+    ├── state.json         实例 ID、已安装版本与文件基准
+    ├── update.lock        跨进程排他锁
+    ├── transaction.json   最近文件事务
+    ├── downloads/
+    └── backups/
 ```
 
-ZIP 根目录直接映射到 `project_dir`，不能额外套一层项目文件夹。`work_dir` 应位于应用目录之外，不能放进 `vendor`、Web 公开目录或会自动清理的临时目录。同一安装的 HTTP、队列和 CLI 共用工作目录；不同安装分别配置。
+ZIP 根目录直接映射到 `project_dir`，不能额外套一层项目文件夹。工作目录可以位于项目内，会自动加入保护路径，不参与文件覆盖和废弃清理；也可继续使用原有项目外目录。不能放进 `vendor`、Web 公开目录或会自动清理的临时目录。同一安装的 HTTP、队列和 CLI 必须共用它。
+
+宝塔的 open_basedir 应允许整个应用根目录，网站入口仍设为 public，无需开放父目录。FTP 只需访问应用目录。若项目没有 public 分层、整个项目都可由 HTTP 访问，须先在 Nginx/Apache 禁止访问工作目录，不能依赖目录名字隐藏；FTP 权限不能替代 PHP 运行用户的写权限。
+
+已有安装修改 work_dir 时，先停止更新任务，完整移动原目录内容，再修改配置；不要只新建空目录，否则会丢失已安装版本、文件基准和回滚记录。工作目录不属于可随意清理的运行缓存。
 
 ## Updater API
 
@@ -215,6 +218,7 @@ Linux 读取 `/etc/machine-id`，备选 `/var/lib/dbus/machine-id`；Windows 查
 | 字段 | 类型 | 返回条件与含义 |
 | --- | --- | --- |
 | `update` | bool | 始终返回，有无更新 |
+| `force_update` | bool | 中心v0.15+返回；范围内有强制版本为true，无更新false；宿主决定执行方式 |
 | `status_code` | int | 有更新 `200`，无更新 `304`；这是业务字段，不是 HTTP 状态码 |
 | `license_value` | string\|null | 在线凭证 |
 | `version` | string | 有更新：显示版本 |
@@ -528,3 +532,9 @@ php vendor/bin/cli-app-updater rollback /srv/private/updater.php
 库固定请求 `platform=php`，并提交已安装版本与配置渠道。产品通信密钥和实例 ID 经请求头传输；下载和清单使用中心签发的同产品相对票据地址，不附带产品密钥，不跟随跨站跳转。检查与下载须使用相同出口 IP，中心会在下载时重新验证授权及包流量额度。
 
 不提供增量候选的中心按完整包更新。离线授权签发公钥由应用通过可信渠道配置。
+
+## 强制更新标记（中心 v0.15.0+）
+
+`check()` 和 `summary()` 提供布尔值 `force_update`。当前版本之后、可获取的目标版本之前（含目标）存在强制版本时为 true；已安装版本、草稿、撤回、其他渠道/目标或授权截止后的版本不参与判断。没有更新时为 false。`changelog()` 的每条记录提供该版本自己的 force_update。
+
+本库只透传标记，不自动弹窗、阻止业务或在检查时安装。应用决定是否允许跳过、进入维护或调用 update()。旧中心没有字段时，summary() 默认 false。

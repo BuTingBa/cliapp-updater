@@ -79,7 +79,7 @@ try {
     $upload = (new Package())->upload($uid, new think\file\UploadedFile($archive, 'fixture.zip', 'application/zip', null, true));
     buildFixture($upload['file_url'], $directory . '/tasks');
     (new Release())->save($uid, [
-        'product_id' => $productId, 'version' => '1.0.0', 'version_code' => 1, 'state' => 1,
+        'product_id' => $productId, 'version' => '1.0.0', 'version_code' => 1, 'state' => 1, 'force_update' => 1,
         'packages' => [$upload + ['platform' => 'php', 'requirements' => 'PHP >= 7.4']],
     ]);
     $socket = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
@@ -106,7 +106,7 @@ try {
     $config = [
         'base_url' => 'http://' . $address, 'http' => ['allow_http' => true],
         'product_code' => $product['code'], 'product_key' => $product['secret_key'],
-        'project_dir' => $root, 'work_dir' => $directory . '/work', 'domain' => 'example.com',
+        'project_dir' => $root, 'work_dir' => $root . '/private-updater', 'domain' => 'example.com',
     ];
     $updater = new Updater($config);
     $localKey = $updater->getClientKey();
@@ -125,6 +125,7 @@ try {
     $updater = new Updater($config);
     verify($updater->authorize()['authorized'], 'Online license validates through real API');
     $release = $updater->check();
+    verify($release['force_update'] === true && Updater::summary($release)['force_update'] === true, 'Real forced-update flag reaches client summary');
     verify($release['update'] && $release['package']['platform'] === 'php', 'Real API response matches package contract');
     $notes = $updater->changelog();
     verify($notes['total'] === 1 && $notes['list'][0]['version'] === '1.0.0' && $notes['current_version_code'] === 0, 'Real changelog matches installed version');
