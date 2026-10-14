@@ -18,6 +18,15 @@ if ($path === '/ready') {
 }
 $action = $_GET['action'] ?? (json_decode(file_get_contents('php://input'), true)['action'] ?? '');
 $mode = $scenario['mode'] ?? '';
+if ($action === 'manifest') {
+    if ($mode === 'expired') {
+        http_response_code(403);
+        return;
+    }
+    header('Content-Type: application/json');
+    readfile($directory . '/manifest.json');
+    return;
+}
 if ($action === 'download' || strpos($path, '/api/packages/') === 0) {
     if ($mode === 'download_redirect') {
         header('Location: /forbidden');
@@ -28,7 +37,8 @@ if ($action === 'download' || strpos($path, '/api/packages/') === 0) {
         echo 'expired';
         return;
     }
-    readfile($directory . '/package.zip');
+    $deltaId = $scenario['release']['delta_package']['id'] ?? null;
+    readfile($deltaId !== null && (int) ($_GET['package_id'] ?? 0) === $deltaId ? $directory . '/delta.zip' : $directory . '/package.zip');
     return;
 }
 header('Content-Type: application/json');

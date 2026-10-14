@@ -42,7 +42,7 @@ function package(array $files, ?callable $configure = null): void
     $zip = new ZipArchive();
     $zip->open($directory . '/package.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
     foreach ($files as $path => $content) {
-        $zip->addFromString($path, $content);
+        $zip->addFromString((string) $path, $content);
     }
     if ($configure) {
         $configure($zip);
@@ -396,6 +396,8 @@ try {
     expect(file_get_contents($root . '/index.php') === 'old-code'
         && $call('status')['data']['version_code'] === 0, 'Failed HTTP health hook restores files and version');
     $call('unsupported', 500);
+
+    require __DIR__ . '/delta.php';
 
     if (function_exists('sodium_crypto_sign_keypair')) {
         $pair = sodium_crypto_sign_keypair();

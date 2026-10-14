@@ -9,10 +9,10 @@
 ## 安装与最小调用
 
 ```sh
-composer require buting/cliapp-updater:dev-main
+composer require buting/cliapp-updater:^1.1
 ```
 
-目前提供 `dev-main` 开发分支，适合接入验证；请提交应用的 composer.lock 固定实际安装的提交。稳定版本发布后可使用 `composer require buting/cliapp-updater`，或按已发布版本指定约束，不需要降低整个项目的 minimum-stability。
+1.1系列提供完整包和文件级增量安装、清单读取、废弃文件清理及恢复。请提交应用的composer.lock固定版本。统一产品API需要中心v0.13，更新日志需要v0.13.1，增量与清单需要v0.14；先升级中心，再升级客户端包。
 
 Composer 包名是 `buting/cliapp-updater`，安装目录为 `vendor/buting/cliapp-updater`；PHP 命名空间仍为 `BuTing\CliAppUpdater`，可选命令入口仍为 `vendor/bin/cli-app-updater`。后两者与 Composer 包名不是同一项配置。
 
@@ -63,7 +63,7 @@ $data = $handler($updater, 'update');            // 同步执行，完成后返�
 return json(['success' => true, 'data' => $data]); // 使用所在框架的响应方法。
 ```
 
-[examples/http.php](examples/http.php) 支持 `check`、`changelog`、`update`、`rollback`、`status`、`client-key`。它只返回函数，直接访问文件不会安装。示例返回的 `updated` / `rolled_back` 是展示字段，与下文库方法的原始返回值不同。异常由应用统一处理，不向浏览器返回密钥、完整堆栈或磁盘路径。
+[examples/http.php](examples/http.php) 支持 `check`、`changelog`、`manifest`、`update`、`rollback`、`status`、`client-key`。它只返回函数，直接访问文件不会安装。示例返回的 `updated` / `rolled_back` 是展示字段，与下文库方法的原始返回值不同。异常由应用统一处理，不向浏览器返回密钥、完整堆栈或磁盘路径。
 
 前端等待返回，期间禁用重复点击并显示“正在更新”。超时、断网或页面关闭表示**结果尚未确认**，不能据此认定安装失败，也不要自动重试或自动恢复。
 
@@ -100,6 +100,7 @@ FPM 需给下载、解压、备份、覆盖留出完整时间。核对 PHP `max_
 | `domain` | string | `''` | 可信配置域名，不取请求Host；无协议/端口/路径，不支持IP；无域名绑定可空 |
 | `client_name` | string | `''` | 平台展示的安装实例名称 |
 | `channel` | string | `'stable'` | stable 或 beta |
+| `prefer_delta` | bool | `true` | 基础包及本地文件匹配、目标清单就绪且增量更小时选择增量；false强制完整包 |
 | `preserve` | string[] | `[]` | 追加项目根相对保护路径，如 config/local.php；目录含子文件，不支持通配符 |
 | `max_package_bytes` | int | `2147483648` | ZIP下载上限，正整数，默认2 GiB；不是服务器承载能力保证 |
 | `http` | array | `[]` | 下表中的传输选项 |
@@ -170,6 +171,8 @@ HTTPS始终校验证书，不跟随重定向。下载仅接受受限相对票据
 | `client_key` | string | 实例标识 |
 | `client_key_source` | string | machine / random / configured / legacy |
 | `version_code` | int | 当前已提交版本序号 |
+| `package_id` | int，可缺省 | 上次安装的目标完整包ID，旧状态可能没有；0表示未知，不允许据此匹配增量 |
+| `package_sha256` | string，可缺省 | 目标完整ZIP的SHA-256，用于核对增量基线 |
 | `version` | string，可缺省 | 更新后记录的显示版本，首次初始化可能没有 |
 | `updated_at` | string，可缺省 | 更新记录的UTC ISO 8601时间；恢复时回到旧状态 |
 | `transaction_status` | string | none / applying / complete / rolling_back / rolled_back / unknown |
@@ -220,6 +223,7 @@ $older = $updater->changelog('before', 1, 10);
 | `changelog` | string | 有更新时的说明 |
 | `published_at` | string | 有更新时的平台首次发布时间 |
 | `package` | array | 有更新时的包信息，见下表 |
+| `delta_package` | array或null | 中心提供的增量候选；不替代package，是否使用由update在锁内核验 |
 
 package中本库使用的字段：
 
@@ -232,28 +236,48 @@ package中本库使用的字段：
 | `sha256` | string | 64位小写十六进制校验值 |
 | `file_url` | string | 短期票据相对路径，供download使用，不展示 |
 | `requirements` | string | 运行要求文字，不自动解析成环境检查 |
+| `id` | int | 完整包ID，安装后持久保存为增量基础包标识 |
+| `manifest_state` | string | 清单处理状态，ready时可读取 |
+| `manifest_url` | string或null | 同产品受控清单票据，不直接展示 |
+| `manifest_sha256` | string | 清单原始JSON字节的SHA-256 |
+
+delta_package沿用包的ID/类型/大小/哈希/票据字段，package_type为2，另有base_package_id和target_package_id。check提交supports_delta及持久的base_package_id；不会只凭版本号推测基础包。check返回候选不代表本地基线已通过逐文件核验。
 
 平台可能返回更多元数据，file_full_url/config不会用于跨站下载或执行命令。无更新时不保证存在版本/package字段。拒绝授权、传输错误、非法元数据抛异常，不伪装成update=false。
 
 ### `download(array $release): string`
 
-release是近期check的完整返回值且update=true，不能传summary的结果。返回校验完毕的ZIP绝对路径，位于work_dir/downloads。只下载、不安装、不推进版本。
+release是近期check的完整返回值且update=true，不能传summary的结果。始终下载其中的完整包package，返回校验完毕的ZIP绝对路径，位于work_dir/downloads。只下载、不安装、不推进版本；自动增量选择由update处理。
 
 成功后的文件由调用方保管或清理，失败临时下载自动清理。票据失效或出口IP变化时重新check。没有断点续传；不能把下载路径传给update，update会重新检查并下载。
+
+### `manifest(array $release): array`
+
+release为近期check的完整返回值，update=true，package.manifest_state须为ready。通过同产品票据读取完整包清单，校验原始字节SHA-256、路径、数量和解压限额；不写应用文件，也不改变已安装状态。清单上限16MiB，HTTP超时使用http.timeout；未就绪、损坏、拒绝授权均抛异常。
+
+```php
+$release = $updater->check();
+if ($release['update'] && ($release['package']['manifest_state'] ?? '') === 'ready') {
+    $manifest = $updater->manifest($release);
+    // $manifest['files']['app/index.php'] => ['size' => 字节数, 'sha256' => 哈希, 'mode' => 0644]
+}
+```
+
+返回schema（apps.manifest.v1）、files（相对路径到size/sha256/mode的映射）、file_count、expanded_size。mode为0644或0755。它描述服务器完整包，包括客户端保护路径；不能把此清单直接当作“允许删除本地其他文件”的指令。
 
 ### `update(array $hooks = []): ?array`
 
 hooks是可选本地回调，见后文。在FPM/Webman/队列/CLI中均可调用，**同步完成后返回，不返回后台任务ID**。
 
-顺序：取锁 → 检查授权与版本 → 下载校验 → 安全解压 → 备份与恢复计划落盘 → before_apply → 覆盖文件 → after_apply → 提交版本/事务 → after_commit → 返回。
+顺序：取锁 → 检查授权与版本 → 核对基线并选择完整/增量包 → 下载校验 → 安全解压及清理计划 → 备份与恢复计划落盘 → before_apply → 覆盖/清理文件 → after_apply → 提交版本/文件基线 → after_commit → 返回。
 
-返回null表示无更新，不运行安装回调；成功返回summary字段加 `backup_dir: string`（本地备份目录）。update=true是本次发布摘要，不表示还有下一次更新。
+返回null表示无更新，不运行安装回调；成功返回summary字段加 `backup_dir: string`（本地备份目录）、`package_type: int`（实际安装方式，1完整/2增量）、`retained_files: string[]`（发现本地修改而保留的废弃文件相对路径）。update=true是本次发布摘要，不表示还有下一次更新。
 
 覆盖或提交前回调发生可捕获异常时，尝试恢复文件和版本；数据库及回调副作用不自动回滚。after_commit失败会抛异常，但已安装版本保留，需补完后续动作。硬终止进程不能依赖catch/finally，需按持久事务恢复。
 
 ### `rollback(array $hooks = []): void`
 
-hooks为可选恢复回调。同步恢复最近文件事务和原版本，删除该事务新增文件及空目录。无事务时抛异常，已rolled_back时直接返回。不能指定任意历史版本，不回滚数据库、不重启框架。
+hooks为可选恢复回调。同步恢复最近文件事务、被清理的旧文件、原版本及基础包/文件清单，删除该事务新增文件及空目录。无事务时抛异常，已rolled_back时直接返回。不能指定任意历史版本，不回滚数据库、不重启框架。
 
 恢复前校验全部旧文件备份，损坏则拒绝覆盖。保留最近事务引用的backups和状态文件。
 
@@ -307,7 +331,13 @@ HTTP恢复入口可调用同一个rollback。若更新破坏了应用路由，�
 
 ZIP根对应project_dir，不要多套项目文件夹。发布前准备依赖与构建产物，库不在线执行Composer、数据库命令或包内脚本。
 
-默认保护 `.git`、`.env`、任意层级的 `.env.*`、`.user.ini`、`runtime`、`storage`、`upload`、`uploads`、`public/upload`、`public/uploads`、`public/storage`；preserve追加客户配置/数据。ZIP未包含的旧文件不自动删除。拒绝危险路径、符号链接、大小写碰撞及超限/损坏ZIP。
+默认保护 `.git`、`.env`、任意层级的 `.env.*`、`.user.ini`、`runtime`、`storage`、`upload`、`uploads`、`public/upload`、`public/uploads`、`public/storage`；preserve追加客户配置/数据。只清理上次由本库安装、这次不再需要且内容未修改的文件。未登记文件、保护路径和本地修改的废弃文件保留；旧状态首次升级不推测历史文件归属。拒绝危险路径、符号链接、大小写碰撞及超限/损坏ZIP。
+
+本库把已安装文件基线保存在私有state.json中，status不返回完整清单。增量需要基础包ID、基础整包哈希、本地逐文件哈希均匹配，且安装结果与目标完整清单一致；无基线、本地文件丢失/修改、增量不匹配或不够小时使用完整包。已选中增量后发现清单/包损坏、票据失效或授权拒绝会报错，不掩盖错误反复下载。
+
+增量格式为中心生成的apps.delta.v1：update.json描述基础/目标身份、变更文件和删除列表，files/保存变更文件。两者不会作为额外目录部署进项目。支持只有删除、没有变更文件的增量；不支持二进制差分。文件与目录互换、仅大小写改名会安全拒绝，发布时应避免这类结构变化。
+
+ZIP文件名须是无歧义UTF-8；中文路径和内容按原字节保留，不猜测GBK或自动转码。包里的执行权限用于新文件，已有文件保留原权限。服务器扩展config不会覆盖本地preserve规则。
 
 SHA-256核对可信平台提供的包内容；离线授权签名不等于ZIP签名。框架缓存、常驻进程重载及数据库由宿主应用负责。
 
@@ -347,7 +377,7 @@ updates_until=null表示不限制版本日期；不传publishedAt时只检查签
 
 ### API 范围
 
-以上是应用接入API的全部公开方法与配置，没有公开属性、全局配置变量、队列开关或async参数。Files、HttpClient、Installer、ClientIdentity是包内实现辅助类，通过Updater/OfflineLicense接入，不依赖其内部格式作为应用接口。
+以上是应用接入API的全部公开方法与配置，没有公开属性、全局配置变量、队列开关或async参数。Files、HttpClient、Installer、Manifest、ClientIdentity是包内实现辅助类，通过Updater/OfflineLicense接入，不依赖其内部格式作为应用接口。
 
 ## 可选命令行与示例
 
@@ -359,7 +389,7 @@ php vendor/bin/cli-app-updater rollback /srv/private/updater.php
 
 配置文件return数组，与构造配置一致；CLI专用可另加hooks数组。PHP API需把hooks单独传给update/rollback，放进构造配置不能代替方法参数。
 
-支持client-key/status/report/authorize/check/changelog/download/update/rollback，输出JSON；退出码0成功/无更新，1失败，2参数错误。
+支持client-key/status/report/authorize/check/changelog/manifest/download/update/rollback，输出JSON；退出码0成功/无更新，1失败，2参数错误。manifest命令先check再读取最新目标清单，无更新时返回无更新摘要。
 
 - [HTTP处理函数](examples/http.php)：后台检查、升级、恢复及注释。
 - [完整CLI演示](examples/demo.php)：主要操作与回调位置。
@@ -370,4 +400,4 @@ php vendor/bin/cli-app-updater rollback /srv/private/updater.php
 
 本版本使用中心 v0.13 的固定产品入口 `/api/{product_code}`，action 参数选择 report、authorize、check、download；PHP 包查询明确提交 platform=php、version_code 和 channel。配置的 base_url 仍是可信中心站点地址，已有 client_key 和状态文件不变。
 
-下载只接受同产品的相对票据 URL（兼容旧票据路径），忽略 file_full_url，拒绝跨产品地址及跳转。中心在每次下载时复查授权和所属用户的月流量额度；403 不应无限重试。先升级中心，再更新客户端库。本地版本尚未自动发布到 GitHub/Packagist。
+下载只接受同产品的相对票据URL（兼容旧票据路径），忽略file_full_url，拒绝跨产品地址及跳转。中心在每次包下载时复查授权和所属用户月流量额度；清单也通过受控票据读取。403不应无限重试。增量/清单需要中心v0.14；未提供增量信息的中心仍按完整包更新。

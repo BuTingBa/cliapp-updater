@@ -8,7 +8,7 @@ declare(strict_types=1);
  * Starts a loopback server; creates only its own tagged fixtures, deletes them in finally.
  * No DDL, no existing business-data updates, no email/SMS. Requires server/vendor and server/.env.
  */
-use app\service\{License, LicenseCertificate, Package, Product, Release};
+use app\service\{License, LicenseCertificate, Package, PackageBuild, Product, Release};
 use BuTing\CliAppUpdater\{Files, OfflineLicense, Updater};
 use think\facade\Db;
 
@@ -35,6 +35,26 @@ function verify(bool $condition, string $message): void
     }
     $checks++;
 }
+
+/** Run only this fixture's tasks, never consume another developer's pending queue. */
+function buildFixture(string $key, string $work): void
+{
+    \app\support\DatabaseLock::run('package-worker', static function () use ($key, $work): void {
+        $file = Db::name('stored_file')->where('file_url', $key)->find();
+        foreach (Db::name('package_task')->where('file_id', $file['id'])->where('state', 'pending')->order('id')->select() as $task) {
+            $directory = Files::directory($work . '/' . $task['id']);
+            try {
+                $method = new ReflectionMethod(PackageBuild::class, $task['kind'] === 'manifest' ? 'analyze' : 'buildDelta');
+                $arguments = $task['kind'] === 'manifest' ? [$file, $directory] : [$task, $file, $directory];
+                $method->invokeArgs(new PackageBuild(), $arguments);
+                Db::name('package_task')->where('id', $task['id'])->update(['state' => 'succeeded']);
+                $file = Db::name('stored_file')->find($file['id']);
+            } finally {
+                Files::removeTree($directory);
+            }
+        }
+    });
+}
 try {
     foreach (['product' => ['secret_key'], 'release_package' => ['sha256', 'requirements'], 'upgrade_license' => ['binding_client', 'verification_mode']] as $table => $columns) {
         verify(!array_diff($columns, array_column(Db::query('SHOW COLUMNS FROM ' . $table), 'Field')), 'Current live schema supports updater protocol');
@@ -50,8 +70,14 @@ try {
     $zip->open($archive, ZipArchive::CREATE);
     $zip->addFromString('index.php', '<?php echo "new-release";');
     $zip->addFromString('.env', 'must-not-replace');
+    $unchanged = random_bytes(16384);
+    $zip->addFromString('assets/unchanged.bin', $unchanged);
+    $zip->addFromString('obsolete.php', 'obsolete');
+    $zip->addFromString('123', 'numeric filename');
+    $zip->addFromString('中文/说明.txt', '原始中文');
     $zip->close();
     $upload = (new Package())->upload($uid, new think\file\UploadedFile($archive, 'fixture.zip', 'application/zip', null, true));
+    buildFixture($upload['file_url'], $directory . '/tasks');
     (new Release())->save($uid, [
         'product_id' => $productId, 'version' => '1.0.0', 'version_code' => 1, 'state' => 1,
         'packages' => [$upload + ['platform' => 'php', 'requirements' => 'PHP >= 7.4']],
@@ -130,6 +156,40 @@ try {
         verify(proc_close($client) === 0 && $errors === '' && is_array(json_decode($output, true)), 'Real-platform CLI ' . $command . ' succeeds');
     }
     verify(file_get_contents($root . '/index.php') === 'old' && $updater->status()['version_code'] === 0, 'CLI deployment and recovery restore original installation');
+    $updater->update();
+    $baseId = $updater->status()['package_id'];
+    $nextArchive = $directory . '/next.zip';
+    $zip = new ZipArchive();
+    $zip->open($nextArchive, ZipArchive::CREATE);
+    $zip->addFromString('index.php', 'next-release');
+    $zip->addFromString('assets/unchanged.bin', $unchanged);
+    $zip->addFromString('中文/说明.txt', '新版中文');
+    $zip->addFromString('new.php', 'new');
+    $zip->close();
+    $nextUpload = (new Package())->upload($uid, new think\file\UploadedFile($nextArchive, 'next.zip', 'application/zip', null, true));
+    buildFixture($nextUpload['file_url'], $directory . '/tasks');
+    (new Release())->save($uid, ['product_id' => $productId, 'version' => '1.1.0', 'version_code' => 2, 'state' => 1,
+        'delta_enabled' => 1, 'base_package_id' => $baseId, 'packages' => [$nextUpload + ['platform' => 'php']]]);
+    buildFixture($nextUpload['file_url'], $directory . '/tasks');
+    $next = $updater->check();
+    verify($next['delta_package']['base_package_id'] === $baseId, 'Real central API offers exact-base delta');
+    verify(isset($updater->manifest($next)['files']['中文/说明.txt']), 'Real manifest hash and UTF-8 filenames verify');
+    $result = $updater->update();
+    verify($result['package_type'] === 2 && file_get_contents($root . '/index.php') === 'next-release', 'Real central-generated delta installs');
+    verify(!is_file($root . '/obsolete.php') && file_get_contents($root . '/.env') === 'local', 'Real delta deletion protects local configuration');
+    verify(!is_file($root . '/123'), 'Real central numeric filename deletion is compatible');
+    verify(file_get_contents($root . '/中文/说明.txt') === '新版中文', 'Real delta preserves UTF-8 content and filenames');
+    $updater->rollback();
+    verify($updater->status()['package_id'] === $baseId && is_file($root . '/obsolete.php'), 'Real delta rollback restores baseline and deleted files');
+    $deltaCli = proc_open([getenv('UPDATER_TEST_PHP') ?: PHP_BINARY, dirname(__DIR__) . '/bin/cli-app-updater', 'update', $cliConfig],
+        [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $deltaPipes);
+    fclose($deltaPipes[0]);
+    $deltaResult = json_decode(stream_get_contents($deltaPipes[1]), true);
+    $deltaErrors = stream_get_contents($deltaPipes[2]);
+    fclose($deltaPipes[1]);
+    fclose($deltaPipes[2]);
+    verify(proc_close($deltaCli) === 0 && $deltaErrors === '' && $deltaResult['package_type'] === 2, 'Real central delta installs through configured PHP CLI');
+    $updater->rollback();
     Db::name('upgrade_license')->where('id', $license['id'])->update(['state' => 0]);
     try {
         $updater->download($release);
@@ -143,7 +203,7 @@ try {
 } catch (Throwable $error) {
     $failure = $error;
     // Never print DB exception traces or request credentials.
-    fwrite(STDERR, 'FAIL: ' . get_class($error) . ': ' . $error->getMessage() . "\n");
+    fwrite(STDERR, 'FAIL: ' . get_class($error) . ': ' . $error->getMessage() . ' (' . basename($error->getFile()) . ':' . $error->getLine() . ")\n");
 } finally {
     if (is_resource($process)) {
         proc_terminate($process);
@@ -159,6 +219,10 @@ try {
             }
         }
         Db::transaction(static function () use ($uid, $productId): void {
+            $fileIds = Db::name('stored_file')->where('user_id', $uid)->column('id');
+            if ($fileIds) {
+                Db::name('package_task')->whereIn('file_id', $fileIds)->delete();
+            }
             $releaseIds = $productId ? Db::name('release_version')->where('product_id', $productId)->column('id') : [];
             if ($releaseIds) {
                 Db::name('release_package')->whereIn('release_id', $releaseIds)->delete();

@@ -56,12 +56,7 @@ final class HttpClient
 
     public function download(string $path, string $destination, int $size, string $sha256, ?string $productCode = null): void
     {
-        // Ignore file_full_url: the platform's relative ticket route stays on the configured origin.
-        $unified = $productCode !== null && preg_match('~^/api/' . preg_quote(rawurlencode($productCode), '~')
-            . '\?action=download&package_id=[1-9][0-9]*&ticket=[a-f0-9]{64}$~D', $path);
-        if (!$unified && !preg_match('~^/api/packages/[1-9][0-9]*/download/[a-f0-9]{64}$~D', $path)) {
-            throw new RuntimeException('Invalid download ticket path');
-        }
+        $this->ticketPath($path, $productCode, 'download');
         $output = fopen($destination, 'xb');
         if ($output === false) {
             throw new RuntimeException('Cannot create download file');
@@ -94,6 +89,37 @@ final class HttpClient
             throw $error;
         }
         fclose($output);
+    }
+
+    public function manifest(string $path, string $sha256, string $productCode): array
+    {
+        $this->ticketPath($path, $productCode, 'manifest');
+        $body = '';
+        $status = $this->perform($this->baseUrl . $path, [], static function ($curl, string $chunk) use (&$body): int {
+            if (strlen($body) + strlen($chunk) > 16777216) {
+                return 0;
+            }
+            $body .= $chunk;
+            return strlen($chunk);
+        }, null, $this->options['timeout']);
+        if ($status !== 200 || !hash_equals($sha256, hash('sha256', $body))) {
+            throw new RuntimeException('Manifest download rejected or SHA-256 mismatch', $status === 200 ? 0 : $status);
+        }
+        $document = json_decode($body, true, 64, JSON_THROW_ON_ERROR);
+        if (!is_array($document) || ($document['schema'] ?? '') !== 'apps.manifest.v1' || !is_array($document['files'] ?? null)) {
+            throw new RuntimeException('Invalid package manifest');
+        }
+        return $document;
+    }
+
+    private function ticketPath(string $path, ?string $productCode, string $action): void
+    {
+        // Ignore file_full_url: the platform's relative ticket route stays on the configured origin.
+        $unified = $productCode !== null && preg_match('~^/api/' . preg_quote(rawurlencode($productCode), '~')
+            . '\?action=' . $action . '&package_id=[1-9][0-9]*&ticket=[a-f0-9]{64}$~D', $path);
+        if (!$unified && ($action !== 'download' || !preg_match('~^/api/packages/[1-9][0-9]*/download/[a-f0-9]{64}$~D', $path))) {
+            throw new RuntimeException('Invalid download ticket path');
+        }
     }
 
     private function perform(string $url, array $headers, callable $write, ?string $body, int $timeout): int

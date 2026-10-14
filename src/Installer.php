@@ -23,7 +23,7 @@ final class Installer
         foreach ($this->preserve as $path) {
             Files::relative($path);
         }
-        $this->limits = $limits + ['max_files' => 50000, 'max_expanded_bytes' => 10737418240];
+        $this->limits = $limits + Manifest::LIMITS;
         foreach ($this->limits as $limit) {
             if (!is_int($limit) || $limit < 1) {
                 throw new \InvalidArgumentException('Archive limits must be positive integers');
@@ -41,7 +41,26 @@ final class Installer
         }
     }
 
-    public function install(string $archive, array $release, array $state, array $hooks = []): array
+    /** A delta is usable only when the recorded base is still present on disk. */
+    public function matchesBase(array $state, int $packageId): bool
+    {
+        if ($packageId < 1 || ($state['package_id'] ?? 0) !== $packageId || !isset($state['installed_files'])
+            || !preg_match('/^[a-f0-9]{64}$/D', $state['package_sha256'] ?? '')) {
+            return false;
+        }
+        foreach (Manifest::files($state['installed_files'], $this->limits) as $path => $file) {
+            if ($this->protected((string) $path)) {
+                continue;
+            }
+            $target = Files::target($this->root, (string) $path);
+            if (!is_file($target) || filesize($target) !== $file['size'] || !hash_equals($file['sha256'], hash_file('sha256', $target))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public function install(string $archive, array $release, array $state, array $hooks = [], ?array $delta = null, ?array $targetFiles = null): array
     {
         $this->assertReady();
         $id = gmdate('YmdHis') . '-' . bin2hex(random_bytes(6));
@@ -49,8 +68,52 @@ final class Installer
         $backup = Files::directory($this->work . '/backups/' . $id);
         $recorded = false;
         try {
-            $entries = $this->extract($archive, $stage);
             $previous = Files::json($this->work . '/state.json');
+            if ($delta !== null && !$this->matchesBase($previous, $delta['base_package_id'])) {
+                throw new RuntimeException('Delta baseline changed before installation; check for updates again');
+            }
+            $entries = $this->extract($archive, $stage, $delta);
+            $oldFiles = Manifest::files($previous['installed_files'] ?? [], $this->limits);
+            $files = $delta === null ? [] : $oldFiles;
+            foreach ($entries as $path => $entry) {
+                $files[$path] = ['size' => $entry['size'], 'sha256' => hash_file('sha256', $stage . '/' . $path),
+                    'mode' => ($entry['mode'] & 0111) ? 0755 : 0644];
+            }
+            $deleted = $delta === null ? array_keys(array_diff_key($oldFiles, $files)) : $delta['deleted'];
+            $retained = [];
+            foreach ($deleted as $path) {
+                $path = Files::relative((string) $path);
+                unset($files[$path]);
+                if ($this->protected($path) || !isset($oldFiles[$path])) {
+                    continue;
+                }
+                $target = Files::target($this->root, $path);
+                if (!file_exists($target)) {
+                    continue;
+                }
+                if (!is_file($target) || !hash_equals($oldFiles[$path]['sha256'], hash_file('sha256', $target))) {
+                    $retained[] = $path;
+                    continue;
+                }
+                // Never remove an untracked or locally modified file. Deletions use the same recovery journal.
+                $entries[$path] = ['size' => 0, 'mode' => $oldFiles[$path]['mode'], 'delete' => true];
+            }
+            $files = array_filter($files, function ($path): bool { return !$this->protected((string) $path); }, ARRAY_FILTER_USE_KEY);
+            $state['installed_files'] = Manifest::files($files, $this->limits);
+            // Reject case-only renames and file/directory transitions instead of risking existing data.
+            Manifest::files($files + $oldFiles, ['max_files' => $this->limits['max_files'] * 2,
+                'max_expanded_bytes' => $this->limits['max_expanded_bytes'] * 2]);
+            if ($targetFiles !== null) {
+                $expected = array_filter($targetFiles, function ($path): bool { return !$this->protected((string) $path); }, ARRAY_FILTER_USE_KEY);
+                if (count($expected) !== count($files) || array_diff_key($expected, $files)) {
+                    throw new RuntimeException('Delta result does not match target manifest');
+                }
+                foreach ($expected as $path => $file) {
+                    if ($file['size'] !== $files[$path]['size'] || $file['sha256'] !== $files[$path]['sha256'] || $file['mode'] !== $files[$path]['mode']) {
+                        throw new RuntimeException('Delta result differs from target file: ' . $path);
+                    }
+                }
+            }
             $createdDirectories = [];
             $backupBytes = 0;
             foreach ($entries as $relative => &$entry) {
@@ -99,7 +162,13 @@ final class Installer
                 foreach ($entries as $relative => $entry) {
                     $relative = (string) $relative;
                     $target = Files::target($this->root, $relative);
-                    Files::copy($stage . '/' . $relative, $target, $entry['old_mode'] ?? $entry['mode']);
+                    if (!empty($entry['delete'])) {
+                        if (is_file($target) && !unlink($target)) {
+                            throw new RuntimeException('Cannot delete obsolete file: ' . $relative);
+                        }
+                    } else {
+                        Files::copy($stage . '/' . $relative, $target, $entry['old_mode'] ?? $entry['mode']);
+                    }
                 }
                 self::hook($hooks, 'after_apply', $release);
                 Files::writeJson($this->work . '/state.json', $state);
@@ -125,7 +194,7 @@ final class Installer
         } catch (\Throwable $error) {
             throw new RuntimeException('Update is installed, but after_commit failed; finish cache/process/maintenance handling manually', 0, $error);
         }
-        return $release + ['backup_dir' => $backup];
+        return $release + ['backup_dir' => $backup, 'retained_files' => $retained];
     }
 
     public function rollback(array $hooks = []): void
@@ -183,20 +252,58 @@ final class Installer
         self::hook($hooks, 'after_rollback', $transaction['release']);
     }
 
-    private function extract(string $archive, string $stage): array
+    private function extract(string $archive, string $stage, ?array &$delta = null): array
     {
         $zip = new ZipArchive();
         if ($zip->open($archive, ZipArchive::CHECKCONS) !== true) {
             throw new RuntimeException('Package is not a valid ZIP archive');
         }
         try {
-            if ($zip->numFiles < 1 || $zip->numFiles > $this->limits['max_files']) {
+            if ($zip->numFiles < 1 || $zip->numFiles > $this->limits['max_files'] + ($delta === null ? 0 : 1)) {
                 throw new RuntimeException('Archive entry count exceeds limit or is empty');
+            }
+            if ($delta !== null) {
+                $metadata = $zip->statName('update.json');
+                if (!$metadata || $metadata['size'] > 16777216) {
+                    throw new RuntimeException('Missing or oversized delta metadata');
+                }
+                $document = json_decode($zip->getFromName('update.json'), true, 64, JSON_THROW_ON_ERROR);
+                if (!is_array($document) || ($document['schema'] ?? '') !== 'apps.delta.v1'
+                    || ($document['base_package_id'] ?? null) !== $delta['base_package_id']
+                    || ($document['target_package_id'] ?? null) !== $delta['target_package_id']
+                    || !is_array($document['files'] ?? null) || !is_array($document['deleted'] ?? null)
+                    || count($document['deleted']) > $this->limits['max_files']) {
+                    throw new RuntimeException('Delta metadata does not match the selected packages');
+                }
+                foreach (['base_sha256', 'target_sha256', 'target_manifest_sha256'] as $field) {
+                    if (($document[$field] ?? null) !== $delta[$field]) {
+                        throw new RuntimeException('Delta package identity mismatch: ' . $field);
+                    }
+                }
+                Manifest::files($document['files'], $this->limits);
+                $seenDeleted = [];
+                foreach ($document['deleted'] as $path) {
+                    // PHP converts numeric filename keys to integers when generating array_keys().
+                    if (!is_string($path) && !is_int($path)) {
+                        throw new RuntimeException('Invalid deleted path');
+                    }
+                    $path = (string) $path;
+                    Files::relative($path);
+                    if (isset($document['files'][$path]) || isset($seenDeleted[strtolower($path)])) {
+                        throw new RuntimeException('Conflicting delta deletion');
+                    }
+                    $seenDeleted[strtolower($path)] = true;
+                }
+                $delta += $document;
             }
             $entries = $seen = $spellings = [];
             $total = 0;
             for ($index = 0; $index < $zip->numFiles; $index++) {
                 $stat = $zip->statIndex($index);
+                $raw = $zip->getNameIndex($index, ZipArchive::FL_ENC_RAW);
+                if (preg_match('//u', $stat['name']) !== 1 || (preg_match('/[^\x00-\x7f]/', $raw) && $raw !== $stat['name'])) {
+                    throw new RuntimeException('Ambiguous ZIP filename encoding; use UTF-8');
+                }
                 $directory = substr($stat['name'], -1) === '/';
                 $relative = Files::relative($directory ? substr($stat['name'], 0, -1) : $stat['name']);
                 $key = strtolower($relative);
@@ -223,8 +330,25 @@ final class Installer
                 if ($stat['size'] < 0 || $total > $this->limits['max_expanded_bytes']) {
                     throw new RuntimeException('Expanded archive exceeds size limit');
                 }
+                $source = $relative;
+                if ($delta !== null) {
+                    if ($relative === 'update.json' && !$directory) {
+                        continue;
+                    }
+                    if ($relative === 'files' && $directory) {
+                        continue;
+                    }
+                    if (strpos($relative, 'files/') !== 0) {
+                        throw new RuntimeException('Unexpected entry outside delta files directory');
+                    }
+                    $relative = substr($relative, 6);
+                    if (!$directory && (!isset($delta['files'][$relative]) || $delta['files'][$relative]['size'] !== $stat['size'])) {
+                        throw new RuntimeException('Delta archive does not match its file list');
+                    }
+                }
                 if (!$directory && !$this->protected($relative)) {
-                    $entries[$relative] = ['size' => $stat['size'], 'crc' => sprintf('%08x', $stat['crc']), 'mode' => 0644 | (($attributes >> 16) & 0111)];
+                    $entries[$relative] = ['size' => $stat['size'], 'source' => $source, 'crc' => sprintf('%08x', $stat['crc']),
+                        'mode' => $delta['files'][$relative]['mode'] ?? (0644 | (($attributes >> 16) & 0111))];
                 }
             }
             foreach ($seen as $path => $directory) {
@@ -234,7 +358,14 @@ final class Installer
                     }
                 }
             }
-            if (!$entries) {
+            if ($delta !== null) {
+                foreach ($delta['files'] as $path => $file) {
+                    if (!$this->protected((string) $path) && !isset($entries[$path])) {
+                        throw new RuntimeException('Delta archive is missing a declared file');
+                    }
+                }
+            }
+            if (!$entries && $delta === null) {
                 throw new RuntimeException('Archive contains no installable files');
             }
             $this->space($stage, $total);
@@ -242,7 +373,7 @@ final class Installer
                 $relative = (string) $relative;
                 $target = $stage . '/' . $relative;
                 Files::directory(dirname($target));
-                $input = $zip->getStream($relative);
+                $input = $zip->getStream($entry['source']);
                 $output = fopen($target, 'xb');
                 if ($input === false || $output === false) {
                     if (is_resource($input)) {
@@ -261,6 +392,9 @@ final class Installer
                 }
                 if ($written !== $entry['size'] || hash_file('crc32b', $target) !== $entry['crc']) {
                     throw new RuntimeException('ZIP entry failed size or CRC validation');
+                }
+                if ($delta !== null && !hash_equals($delta['files'][$relative]['sha256'], hash_file('sha256', $target))) {
+                    throw new RuntimeException('Delta file SHA-256 mismatch');
                 }
             }
             return $entries;

@@ -19,6 +19,9 @@ return static function (Updater $updater, string $action, array $hooks = []): ar
             return Updater::summary($updater->check());
         case 'changelog':
             return $updater->changelog();
+        case 'manifest':
+            $release = $updater->check();
+            return $release['update'] ? $updater->manifest($release) : ['update' => false];
         case 'update':
             // 同步等待检查、下载、校验、备份与文件覆盖；不启动命令/子进程。
             $result = $updater->update($hooks);

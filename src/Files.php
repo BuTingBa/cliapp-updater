@@ -24,7 +24,7 @@ final class Files
     public static function relative(string $path): string
     {
         // Deliberately portable: reject Windows aliases, ADS, traversal and backslashes on every OS.
-        if ($path === '' || strlen($path) > 4096 || preg_match('/[\\\\:\x00-\x1f\x7f]/', $path)) {
+        if ($path === '' || strlen($path) > 4096 || preg_match('//u', $path) !== 1 || preg_match('/[\\\\:\x00-\x1f\x7f]/', $path)) {
             throw new RuntimeException('Unsafe relative path');
         }
         foreach (explode('/', $path) as $part) {

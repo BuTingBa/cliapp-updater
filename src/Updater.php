@@ -30,12 +30,15 @@ final class Updater
         $this->config = $config + [
             'client_key' => '', 'machine_id' => null, 'upgrade_token' => '', 'domain' => '', 'client_name' => '',
             'version_code' => 0, 'channel' => 'stable', 'preserve' => [], 'http' => [],
-            'max_package_bytes' => 2147483648, 'archive_limits' => [],
+            'max_package_bytes' => 2147483648, 'archive_limits' => [], 'prefer_delta' => true,
         ];
         if (!in_array($this->config['channel'], ['stable', 'beta'], true)) {
             throw new InvalidArgumentException('channel must be stable or beta');
         }
         self::version($this->config['version_code']);
+        if (!is_bool($this->config['prefer_delta'])) {
+            throw new InvalidArgumentException('prefer_delta must be a boolean');
+        }
         if (!is_int($this->config['max_package_bytes']) || $this->config['max_package_bytes'] < 1) {
             throw new InvalidArgumentException('max_package_bytes must be a positive integer');
         }
@@ -65,7 +68,7 @@ final class Updater
             $state = $this->state();
             $state['transaction_status'] = is_file($this->work . '/transaction.json')
                 ? (Files::json($this->work . '/transaction.json')['status'] ?? 'unknown') : 'none';
-            unset($state['identity'], $state['machine_tag']);
+            unset($state['identity'], $state['machine_tag'], $state['installed_files']);
             return $state;
         });
     }
@@ -121,6 +124,15 @@ final class Updater
         });
     }
 
+    /** Reads and validates the target full-package manifest without changing local files. */
+    public function manifest(array $release): array
+    {
+        return $this->locked(function () use ($release): array {
+            $this->validateRelease($release);
+            return $this->readManifest($release['package']);
+        });
+    }
+
     /** Synchronous in any SAPI. The caller owns request deadlines and application maintenance. */
     public function update(array $hooks = []): ?array
     {
@@ -131,13 +143,25 @@ final class Updater
             if (!$release['update']) {
                 return null;
             }
-            $archive = $this->downloadPackage($release);
+            $state = $this->state();
+            $package = $release['package'];
+            $delta = $this->selectDelta($release, $state);
+            $targetFiles = $delta === null ? null : $this->readManifest($package)['files'];
+            $archive = $this->downloadPackage(['package' => $delta ?? $package]);
             try {
-                $state = $this->state();
+                $baseSha256 = $state['package_sha256'] ?? '';
                 $state['version_code'] = $release['version_code'];
                 $state['version'] = $release['version'];
                 $state['updated_at'] = gmdate(DATE_ATOM);
-                return $this->installer->install($archive, self::summary($release), $state, $hooks);
+                $state['package_id'] = $package['id'] ?? 0;
+                $state['package_sha256'] = $package['sha256'];
+                $context = $delta === null ? null : [
+                    'base_package_id' => $delta['base_package_id'], 'target_package_id' => $delta['target_package_id'],
+                    'base_sha256' => $baseSha256, 'target_sha256' => $package['sha256'],
+                    'target_manifest_sha256' => $package['manifest_sha256'],
+                ];
+                return $this->installer->install($archive, self::summary($release), $state, $hooks, $context, $targetFiles)
+                    + ['package_type' => $delta === null ? 1 : 2];
             } finally {
                 if (is_file($archive)) {
                     unlink($archive);
@@ -164,7 +188,11 @@ final class Updater
 
     private function checkUpdate(): array
     {
-        $release = $this->request('check', false);
+        $state = $this->state();
+        $release = $this->request('check', false, [
+            'supports_delta' => $this->config['prefer_delta'] ? 1 : 0,
+            'base_package_id' => $state['package_id'] ?? 0,
+        ]);
         if (!isset($release['update']) || !is_bool($release['update'])) {
             throw new RuntimeException('Missing update flag');
         }
@@ -180,16 +208,52 @@ final class Updater
     private function validateRelease(array $release): void
     {
         self::version($release['version_code'] ?? null);
-        $package = $release['package'] ?? [];
-        if (($release['update'] ?? false) !== true || !is_string($release['version'] ?? null)
-            || !is_array($package) || ($package['platform'] ?? '') !== 'php'
-            || (int) ($package['package_type'] ?? 0) !== 1
+        if (($release['update'] ?? false) !== true || !is_string($release['version'] ?? null) || !is_array($release['package'] ?? null)) {
+            throw new RuntimeException('Expected a PHP release with package metadata');
+        }
+        $this->validatePackage($release['package'], 1);
+    }
+
+    private function validatePackage(array $package, int $type): void
+    {
+        if (($package['platform'] ?? '') !== 'php' || ($package['package_type'] ?? 0) !== $type
+            || (isset($package['id']) && (!is_int($package['id']) || $package['id'] < 1))
+            || !is_string($package['file_url'] ?? null)
             || strtolower(pathinfo($package['file_name'] ?? '', PATHINFO_EXTENSION)) !== 'zip'
             || !preg_match('/^[a-f0-9]{64}$/D', $package['sha256'] ?? '')
             || !is_int($package['file_size'] ?? null) || $package['file_size'] < 1
             || $package['file_size'] > $this->config['max_package_bytes']) {
-            throw new RuntimeException('Expected a full PHP ZIP package with valid size and SHA-256');
+            throw new RuntimeException('Expected a PHP ZIP package with valid type, size and SHA-256');
         }
+    }
+
+    private function selectDelta(array $release, array $state): ?array
+    {
+        $delta = $release['delta_package'] ?? null;
+        $full = $release['package'];
+        if (!$this->config['prefer_delta'] || !is_array($delta) || ($full['manifest_state'] ?? '') !== 'ready'
+            || !is_int($delta['base_package_id'] ?? null) || !is_int($delta['target_package_id'] ?? null)
+            || $delta['target_package_id'] !== ($full['id'] ?? 0)
+            || !$this->installer->matchesBase($state, $delta['base_package_id'])) {
+            return null;
+        }
+        $this->validatePackage($delta, 2);
+        return $delta['file_size'] < $full['file_size'] ? $delta : null;
+    }
+
+    private function readManifest(array $package): array
+    {
+        if (($package['manifest_state'] ?? '') !== 'ready' || !is_string($package['manifest_url'] ?? null)
+            || !preg_match('/^[a-f0-9]{64}$/D', $package['manifest_sha256'] ?? '')) {
+            throw new RuntimeException('The full package manifest is not ready; check again after platform processing');
+        }
+        $manifest = $this->http->manifest($package['manifest_url'], $package['manifest_sha256'], $this->config['product_code']);
+        Manifest::files($manifest['files'], $this->config['archive_limits']);
+        if (($manifest['file_count'] ?? null) !== count($manifest['files'])
+            || ($manifest['expanded_size'] ?? null) !== array_sum(array_column($manifest['files'], 'size'))) {
+            throw new RuntimeException('Manifest totals do not match its files');
+        }
+        return $manifest;
     }
 
     private function downloadPackage(array $release): string

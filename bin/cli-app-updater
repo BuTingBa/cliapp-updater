@@ -7,8 +7,8 @@ use BuTing\CliAppUpdater\Updater;
 
 require isset($_composer_autoload_path) ? $_composer_autoload_path : dirname(__DIR__) . '/autoload.php';
 
-if ($argc !== 3 || !in_array($argv[1], ['client-key', 'status', 'report', 'authorize', 'check', 'changelog', 'download', 'update', 'rollback'], true)) {
-    fwrite(STDERR, "Usage: cli-app-updater <client-key|status|report|authorize|check|changelog|download|update|rollback> /absolute/path/config.php\n");
+if ($argc !== 3 || !in_array($argv[1], ['client-key', 'status', 'report', 'authorize', 'check', 'changelog', 'manifest', 'download', 'update', 'rollback'], true)) {
+    fwrite(STDERR, "Usage: cli-app-updater <client-key|status|report|authorize|check|changelog|manifest|download|update|rollback> /absolute/path/config.php\n");
     exit(2);
 }
 
@@ -30,11 +30,13 @@ try {
     } elseif ($command === 'rollback') {
         $updater->rollback($config['hooks'] ?? []);
         $result = ['rolled_back' => true] + $updater->status();
-    } elseif ($command === 'check' || $command === 'download') {
+    } elseif (in_array($command, ['check', 'download', 'manifest'], true)) {
         $release = $updater->check();
         $result = Updater::summary($release);
         if ($command === 'download' && $release['update']) {
             $result['downloaded_file'] = $updater->download($release);
+        } elseif ($command === 'manifest' && $release['update']) {
+            $result = $updater->manifest($release);
         }
     } else {
         $result = $updater->$command();

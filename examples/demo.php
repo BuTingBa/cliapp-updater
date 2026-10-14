@@ -64,10 +64,13 @@ try {
             break;
         case 'check':
         case 'download':
+        case 'manifest':
             $release = $updater->check(); // 自动初始化 ID，并向平台报告当前版本。
             $result = Updater::summary($release);
             if ($action === 'download' && $release['update']) {
                 $result['downloaded_file'] = $updater->download($release);
+            } elseif ($action === 'manifest' && $release['update']) {
+                $result = $updater->manifest($release);
             }
             break;
         case 'update':
@@ -79,7 +82,7 @@ try {
             $result = $updater->status();
             break;
         default:
-            throw new InvalidArgumentException('支持：client-key/status/report/authorize/check/download/update/rollback');
+            throw new InvalidArgumentException('支持：client-key/status/report/authorize/check/changelog/manifest/download/update/rollback');
     }
     echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
 } catch (Throwable $error) {
