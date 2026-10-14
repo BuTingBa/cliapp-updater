@@ -7,7 +7,7 @@
         "source": "https://github.com/BuTingBa/cliapp-updater",
         "issues": "https://github.com/BuTingBa/cliapp-updater/issues"
     },
-    "type": "library",
+    "type": "composer-plugin",
     "license": "proprietary",
     "authors": [{"name": "BuTing"}],
     "require": {
@@ -16,11 +16,13 @@
         "ext-curl": "*",
         "ext-hash": "*",
         "ext-json": "*",
-        "ext-zip": "*"
+        "ext-zip": "*",
+        "composer-plugin-api": "^2.0"
     },
     "suggest": {"ext-sodium": "Required only for offline Ed25519 license verification"},
     "autoload": {"psr-4": {"BuTing\\CliAppUpdater\\": "src/"}},
     "bin": ["bin/cli-app-updater"],
     "scripts": {"test": "@php tests/run.php"},
-    "archive": {"exclude": ["/tests", "/.github", "/.gitignore"]}
+    "archive": {"exclude": ["/tests", "/.github", "/.gitignore"]},
+    "extra": {"class": "BuTing\\CliAppUpdater\\Composer\\Plugin"}
 }

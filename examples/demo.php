@@ -5,7 +5,7 @@ declare(strict_types=1);
 use BuTing\CliAppUpdater\Updater;
 
 // 用法：php examples/demo.php check；动作见下方 switch。
-// 访问 config.php 指定的真实平台，update 会覆盖指定项目；先在测试项目试用。
+// 访问 config.php 指定的真实平台，check 遇到强制版本及 update 都会覆盖指定项目。
 require dirname(__DIR__) . '/autoload.php';
 
 if (PHP_SAPI !== 'cli') {
@@ -19,7 +19,7 @@ try {
     $action = $argv[1] ?? 'check';
 
     // 回调只来自本地程序。这里演示接入位置，没有实现你的应用维护、迁移或重载。
-    // 运行 update/rollback 前先手工进入维护模式；正式接入时替换这些回调的内容。
+    // 运行 check/update/rollback 前先进入维护模式；正式接入时替换这些回调的内容。
     $hooks = [
         'before_apply' => static function (array $release): void {
             // 确认维护和暂停写入状态；需要一致性备份时必须在 update 之前开启。
@@ -65,9 +65,9 @@ try {
         case 'check':
         case 'download':
         case 'manifest':
-            $release = $updater->check(); // 自动初始化 ID，并向平台报告当前版本。
+            $release = $updater->check($hooks); // 初始化 ID；强制版本直接安装并运行回调。
             $result = Updater::summary($release);
-            if ($action === 'download' && $release['update']) {
+            if ($action === 'download' && $release['update'] && !$release['installed']) {
                 $result['downloaded_file'] = $updater->download($release);
             } elseif ($action === 'manifest' && $release['update']) {
                 $result = $updater->manifest($release);

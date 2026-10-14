@@ -11,12 +11,12 @@ if (PHP_SAPI !== 'cli') {
     exit('本示例通过 CLI 运行；Web 接入请将 check()/getClientKey() 放入自己的后台控制器。');
 }
 
-// 先修改同目录 config.php 中的平台信息与目录。
+// 演示配置；实际应用使用 Updater::fromFile(应用根目录 . '/updater.php')。
 $updater = new Updater(require __DIR__ . '/config.php');
 
 try {
     $release = $updater->check(); // 无须先调用 status()；没有实例 ID 会自动生成。
-    // 确认应用维护流程已接入后，安装可直接调用 $updater->update()，不必预先手工下载。
+    // check() 遇到强制版本会直接安装，调用前须已接入维护流程；普通安装可调用 $updater->update()，不必预先手工下载。
     echo \BuTing\CliAppUpdater\Json::encode([
         'client_key' => $updater->getClientKey(), // 可在后台显示给客户，用于申请授权。
         'release' => Updater::summary($release), // 去掉下载票据和授权凭证后再展示。

@@ -17,7 +17,8 @@ return [
     'domain' => 'shop.example.com', // 可信配置，不读取请求 Host。
     'client_name' => '商城站点',
     'upgrade_token' => getenv('UPDATER_UPGRADE_TOKEN') ?: '', // 可选客户在线凭证。
-    'preserve' => ['config/local.php', 'public/customer-files'],
+    'exclude' => ['/config/local.php', '/public/customer-files/', '*.log'],
+    'hooks' => [], // check() 强制安装、update() 与 rollback() 共用回调。
     // 通常无需配置 client_key 或 machine_id，默认自动生成并保存。
     // 'machine_id' => 'deployment-instance-001', // 容器可指定持久、独立的实例 ID。
     // 'client_key' => 'customer_installation_001', // 也可显式提供既有授权的原实例 ID。

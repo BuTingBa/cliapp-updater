@@ -2,3 +2,5 @@
 /composer.lock
 /updater.local.php
 /.test-*/
+/.updater/
+/updater.php

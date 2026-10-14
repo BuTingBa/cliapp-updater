@@ -18,12 +18,15 @@ final class Installer
     private $preserve;
     /** @var array */
     private $limits;
+    /** @var IgnoreRules */
+    private $exclude;
 
-    public function __construct(string $root, string $work, array $preserve = [], array $limits = [])
+    public function __construct(string $root, string $work, array $preserve = [], array $limits = [], $exclude = [])
     {
         $this->root = $root;
         $this->work = $work;
-        $this->preserve = array_merge(['.git', '.env', '.user.ini', 'runtime', 'storage', 'upload', 'uploads', 'public/upload', 'public/uploads', 'public/storage'], $preserve);
+        $this->preserve = array_merge(['.updater', 'updater.php', '.git', '.env', '.user.ini', 'runtime', 'storage', 'upload', 'uploads', 'public/upload', 'public/uploads', 'public/storage'], $preserve);
+        $this->exclude = new IgnoreRules($exclude);
         // 工作目录可放在项目内；状态、锁、下载和备份永远不参与覆盖或清理。
         if (Files::within($work, $root)) {
             $this->preserve[] = substr($work, strlen(rtrim($root, '/')) + 1);
@@ -423,7 +426,7 @@ final class Installer
                 return true;
             }
         }
-        return false;
+        return $this->exclude->matches($relative);
     }
 
     private function space(string $path, int $bytes): void

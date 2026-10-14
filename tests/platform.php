@@ -106,7 +106,7 @@ try {
     $config = [
         'base_url' => 'http://' . $address, 'http' => ['allow_http' => true],
         'product_code' => $product['code'], 'product_key' => $product['secret_key'],
-        'project_dir' => $root, 'work_dir' => $root . '/private-updater', 'domain' => 'example.com',
+        'project_dir' => $root, 'domain' => 'example.com',
     ];
     $updater = new Updater($config);
     $localKey = $updater->getClientKey();
@@ -125,6 +125,8 @@ try {
     $updater = new Updater($config);
     verify($updater->authorize()['authorized'], 'Online license validates through real API');
     $release = $updater->check();
+    verify($release['installed'] && $updater->status()['version_code'] === 1, 'Real forced check installs immediately');
+    $updater->rollback();
     verify($release['force_update'] === true && Updater::summary($release)['force_update'] === true, 'Real forced-update flag reaches client summary');
     verify($release['update'] && $release['package']['platform'] === 'php', 'Real API response matches package contract');
     $notes = $updater->changelog();
@@ -169,14 +171,14 @@ try {
     $zip->close();
     $nextUpload = (new Package())->upload($uid, new think\file\UploadedFile($nextArchive, 'next.zip', 'application/zip', null, true));
     buildFixture($nextUpload['file_url'], $directory . '/tasks');
-    (new Release())->save($uid, ['product_id' => $productId, 'version' => '1.1.0', 'version_code' => 2, 'state' => 1,
+    (new Release())->save($uid, ['product_id' => $productId, 'version' => '1.1.0', 'version_code' => 2, 'state' => 1, 'force_update' => 1,
         'delta_enabled' => 1, 'base_package_id' => $baseId, 'packages' => [$nextUpload + ['platform' => 'php']]]);
     buildFixture($nextUpload['file_url'], $directory . '/tasks');
     $next = $updater->check();
     verify($next['delta_package']['base_package_id'] === $baseId, 'Real central API offers exact-base delta');
     verify(isset($updater->manifest($next)['files']['中文/说明.txt']), 'Real manifest hash and UTF-8 filenames verify');
-    $result = $updater->update();
-    verify($result['package_type'] === 2 && file_get_contents($root . '/index.php') === 'next-release', 'Real central-generated delta installs');
+    $result = $next['installation'];
+    verify($next['installed'] && $result['package_type'] === 2 && file_get_contents($root . '/index.php') === 'next-release', 'Real central-generated delta installs');
     verify(!is_file($root . '/obsolete.php') && file_get_contents($root . '/.env') === 'local', 'Real delta deletion protects local configuration');
     verify(!is_file($root . '/123'), 'Real central numeric filename deletion is compatible');
     verify(file_get_contents($root . '/中文/说明.txt') === '新版中文', 'Real delta preserves UTF-8 content and filenames');

@@ -29,7 +29,7 @@ final class Updater
         if (PHP_INT_SIZE < 8) {
             throw new RuntimeException('A 64-bit PHP runtime is required');
         }
-        foreach (['base_url', 'product_code', 'product_key', 'project_dir', 'work_dir'] as $name) {
+        foreach (['base_url', 'product_code', 'product_key', 'project_dir'] as $name) {
             if (!isset($config[$name]) || !is_string($config[$name]) || $config[$name] === '') {
                 throw new InvalidArgumentException('Missing configuration: ' . $name);
             }
@@ -38,7 +38,12 @@ final class Updater
             'client_key' => '', 'machine_id' => null, 'upgrade_token' => '', 'domain' => '', 'client_name' => '',
             'version_code' => 0, 'channel' => 'stable', 'preserve' => [], 'http' => [],
             'max_package_bytes' => 2147483648, 'archive_limits' => [], 'prefer_delta' => true,
+            'work_dir' => $config['project_dir'] . '/.updater', 'exclude' => [], 'hooks' => [],
         ];
+        if (!is_string($this->config['work_dir']) || $this->config['work_dir'] === '') {
+            throw new InvalidArgumentException('work_dir must be a non-empty path');
+        }
+        $this->validateHooks($this->config['hooks']);
         if (!in_array($this->config['channel'], ['stable', 'beta'], true)) {
             throw new InvalidArgumentException('channel must be stable or beta');
         }
@@ -60,12 +65,26 @@ final class Updater
             throw new InvalidArgumentException('project_dir must already exist');
         }
         $this->root = Files::directory($config['project_dir']);
-        $this->work = Files::directory($config['work_dir']);
+        $this->work = Files::directory($this->config['work_dir']);
         if (Files::within($this->root, $this->work)) {
             throw new InvalidArgumentException('work_dir cannot equal or contain project_dir');
         }
         $this->http = new HttpClient($config['base_url'], $this->config['http']);
-        $this->installer = new Installer($this->root, $this->work, $this->config['preserve'], $this->config['archive_limits']);
+        $this->installer = new Installer($this->root, $this->work, $this->config['preserve'], $this->config['archive_limits'], $this->config['exclude']);
+    }
+
+    /** Loads trusted local PHP configuration, resolving defaults relative to that file. */
+    public static function fromFile(string $path): self
+    {
+        $path = realpath($path);
+        if ($path === false || !is_file($path)) {
+            throw new InvalidArgumentException('Configuration file does not exist');
+        }
+        $config = require $path;
+        if (!is_array($config)) {
+            throw new InvalidArgumentException('Configuration must return an array');
+        }
+        return new self($config + ['project_dir' => dirname($path)]);
     }
 
     /** Persistent installation identity and last committed version; safe to display. */
@@ -103,11 +122,20 @@ final class Updater
     }
 
     /** Includes a short-lived download ticket; never put the complete result in ordinary logs. */
-    public function check(): array
+    public function check(array $hooks = []): array
     {
-        return $this->locked(function (): array {
+        $hooks = $hooks + $this->config['hooks'];
+        $this->validateHooks($hooks);
+        return $this->locked(function () use ($hooks): array {
             $this->installer->assertReady();
-            return $this->checkUpdate();
+            $release = $this->checkUpdate();
+            if ($release['update'] && $release['force_update']) {
+                $release['installation'] = $this->installRelease($release, $hooks);
+                $release['installed'] = true;
+            } else {
+                $release['installed'] = false;
+            }
+            return $release;
         });
     }
 
@@ -143,6 +171,7 @@ final class Updater
     /** Synchronous in any SAPI. The caller owns request deadlines and application maintenance. */
     public function update(array $hooks = []): ?array
     {
+        $hooks = $hooks + $this->config['hooks'];
         $this->validateHooks($hooks);
         return $this->locked(function () use ($hooks): ?array {
             $this->installer->assertReady();
@@ -150,36 +179,43 @@ final class Updater
             if (!$release['update']) {
                 return null;
             }
-            $state = $this->state();
-            $package = $release['package'];
-            $delta = $this->selectDelta($release, $state);
-            $targetFiles = $delta === null ? null : $this->readManifest($package)['files'];
-            $archive = $this->downloadPackage(['package' => $delta ?? $package]);
-            try {
-                $baseSha256 = $state['package_sha256'] ?? '';
-                $state['version_code'] = $release['version_code'];
-                $state['version'] = $release['version'];
-                $state['updated_at'] = gmdate(DATE_ATOM);
-                $state['package_id'] = $package['id'] ?? 0;
-                $state['package_sha256'] = $package['sha256'];
-                $context = $delta === null ? null : [
-                    'base_package_id' => $delta['base_package_id'], 'target_package_id' => $delta['target_package_id'],
-                    'base_sha256' => $baseSha256, 'target_sha256' => $package['sha256'],
-                    'target_manifest_sha256' => $package['manifest_sha256'],
-                ];
-                return $this->installer->install($archive, self::summary($release), $state, $hooks, $context, $targetFiles)
-                    + ['package_type' => $delta === null ? 1 : 2];
-            } finally {
-                if (is_file($archive)) {
-                    unlink($archive);
-                }
-            }
+            return $this->installRelease($release, $hooks);
         });
+    }
+
+    /** Caller holds the update lock; forced and explicit updates share one transaction path. */
+    private function installRelease(array $release, array $hooks): array
+    {
+        $state = $this->state();
+        $package = $release['package'];
+        $delta = $this->selectDelta($release, $state);
+        $targetFiles = $delta === null ? null : $this->readManifest($package)['files'];
+        $archive = $this->downloadPackage(['package' => $delta ?? $package]);
+        try {
+            $baseSha256 = $state['package_sha256'] ?? '';
+            $state['version_code'] = $release['version_code'];
+            $state['version'] = $release['version'];
+            $state['updated_at'] = gmdate(DATE_ATOM);
+            $state['package_id'] = $package['id'] ?? 0;
+            $state['package_sha256'] = $package['sha256'];
+            $context = $delta === null ? null : [
+                'base_package_id' => $delta['base_package_id'], 'target_package_id' => $delta['target_package_id'],
+                'base_sha256' => $baseSha256, 'target_sha256' => $package['sha256'],
+                'target_manifest_sha256' => $package['manifest_sha256'],
+            ];
+            return $this->installer->install($archive, self::summary($release), $state, $hooks, $context, $targetFiles)
+                + ['package_type' => $delta === null ? 1 : 2];
+        } finally {
+            if (is_file($archive)) {
+                unlink($archive);
+            }
+        }
     }
 
     /** Restores the most recent transaction's files and version state, never the database. */
     public function rollback(array $hooks = []): void
     {
+        $hooks = $hooks + $this->config['hooks'];
         $this->validateHooks($hooks);
         $this->locked(function () use ($hooks): void {
             $this->state();
@@ -189,7 +225,7 @@ final class Updater
 
     public static function summary(array $release): array
     {
-        return array_intersect_key($release, array_flip(['update', 'status_code', 'version', 'version_code', 'changelog', 'published_at']))
+        return array_intersect_key($release, array_flip(['update', 'installed', 'status_code', 'version', 'version_code', 'changelog', 'published_at']))
             + ['force_update' => ($release['force_update'] ?? false) === true, 'requirements' => $release['package']['requirements'] ?? ''];
     }
 
@@ -203,6 +239,10 @@ final class Updater
         if (!isset($release['update']) || !is_bool($release['update'])) {
             throw new RuntimeException('Missing update flag');
         }
+        if (array_key_exists('force_update', $release) && !is_bool($release['force_update'])) {
+            throw new RuntimeException('force_update must be a boolean');
+        }
+        $release['force_update'] = $release['force_update'] ?? false;
         if ($release['update']) {
             $this->validateRelease($release);
             if ($release['version_code'] <= $this->state()['version_code']) {

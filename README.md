@@ -4,24 +4,40 @@
 [![PHP Version](https://img.shields.io/packagist/php-v/buting/cliapp-updater.svg)](https://packagist.org/packages/buting/cliapp-updater)
 [![Total Downloads](https://img.shields.io/packagist/dt/buting/cliapp-updater.svg)](https://packagist.org/packages/buting/cliapp-updater)
 
-框架无关的 PHP 应用更新库，配合 apps.cli 发布与授权服务使用。提供更新检查、日志查询、完整包/文件级增量下载与安装、文件清单校验、备份回滚及离线授权验签。支持在 ThinkPHP/FPM、Webman、队列和 CLI 中调用，不依赖第三方 PHP 包。
+框架无关的 PHP 应用更新库，配合 apps.cli 发布与授权服务使用。提供更新检查、日志查询、完整包/文件级增量下载与安装、文件清单校验、备份回滚及离线授权验签。支持在 ThinkPHP/FPM、Webman、队列和 CLI 中调用，应用运行时不依赖第三方 PHP 包。Composer 插件负责首次安装时生成项目配置；更新操作由应用显式调用。
 
 ## 环境要求与安装
 
+- Composer 2；Composer 2.2 及以上须在项目中允许本插件执行。
 - **64 位 PHP 7.2 及以上**，Composer 约束为 `>=7.2`。
 - 必需扩展：`curl`、`hash`、`json`、`zip`。
 - 可选扩展：`sodium` 用于 Ed25519 离线验签；`intl` 用于国际化域名转换。
 - PHP 运行账户能够读写应用文件和工作目录，并有足够空间保存下载包、解压文件和旧文件备份。
 
 ```bash
-composer require buting/cliapp-updater
+composer config allow-plugins.buting/cliapp-updater true
+composer require buting/cliapp-updater:^2.0
 ```
+
+安装后自动在**使用本包的项目根目录**创建 `.updater/` 和 `updater.php`，配置已关联这两个路径。填写 `updater.php` 中的中心地址、产品 Code、产品密钥和当前版本序号后即可使用。安装过程不联网检查业务更新、不安装应用版本、不生成授权。
 
 已有项目更新依赖：
 
 ```bash
-composer update buting/cliapp-updater
+composer require buting/cliapp-updater:^2.0
 ```
+
+插件类型为 `composer-plugin`，`composer-plugin-api:^2.0` 是 Composer 提供的虚拟接口，不会安装额外运行库。自动初始化发生在 `post-autoload-dump`，因此安装、更新和重新生成自动加载文件时都会检查；已有配置和状态不覆盖，卸载包时也不删除。
+
+使用 `--no-plugins` 或禁止本插件时不会自动创建，可手动执行：
+
+```bash
+php vendor/bin/cli-app-updater init
+```
+
+不要用依赖包的 `scripts` 代替插件：Composer 只执行根项目脚本。详见 [Composer 插件](https://getcomposer.org/doc/articles/plugins.md) 与 [allow-plugins](https://getcomposer.org/doc/06-config.md#allow-plugins)。
+
+**从 1.x 升级：** 2.x 的 `check()` 可能直接安装强制版本，调用点必须具备升级权限、维护准备和足够执行时间；原来仅用于展示的检查入口应改为受控后台操作。已有外置 `work_dir` 可继续使用；新生成的模板不会迁移旧状态，应在切换入口前填入原目录或完整迁移原目录内容。
 
 命名空间为 `BuTing\CliAppUpdater`，命令入口为 `vendor/bin/cli-app-updater`。应用应提交 `composer.lock` 固定依赖版本。
 
@@ -34,20 +50,18 @@ require __DIR__ . '/vendor/autoload.php';
 
 use BuTing\CliAppUpdater\Updater;
 
-$updater = new Updater([
-    'base_url' => 'https://updates.example.com',
-    'product_code' => 'my-shop',
-    'product_key' => getenv('UPDATER_PRODUCT_KEY'),
-    'project_dir' => __DIR__,
-    'work_dir' => __DIR__ . '/.updater',
-    'version_code' => 100,
-    'domain' => 'shop.example.com',
-    'preserve' => ['config/local.php', 'public/customer-files'],
-]);
+// updater.php 是可信本地配置文件，默认使用它所在的目录作为应用根目录。
+$updater = Updater::fromFile(__DIR__ . '/updater.php');
 
-// 检查更新：首次调用自动创建安装实例标识和本地状态。
+// 在有升级权限、已准备维护与写入暂停的操作入口调用。
+// 普通更新只返回信息；强制更新在本次调用中安装完成。
 $release = $updater->check();
 $display = Updater::summary($release);
+if ($release['installed']) {
+    // 已完成强制更新，不再弹出升级确认；按应用流程重载进程或结束维护。
+} elseif ($release['update']) {
+    // 普通版本：展示说明，用户确认后调用 update()。
+}
 
 // 展示安装实例标识，不需要网络请求。
 $clientKey = $updater->getClientKey();
@@ -75,7 +89,7 @@ $result = $updater->update();
 | `product_code` | string | 必填 | 中心产品 Code，不是数据库 ID；由库编码为 URL 路径 |
 | `product_key` | string | 必填 | 产品通信密钥，发送到 `Product-Key` 请求头 |
 | `project_dir` | string | 必填 | 被更新的应用根目录，必须已存在；建议绝对路径 |
-| `work_dir` | string | 必填 | 私有持久工作目录，可自动创建；允许位于项目内，不能等于或包含项目根目录 |
+| `work_dir` | string | `project_dir/.updater` | 私有持久工作目录，可自动创建；允许位于项目内，不能等于或包含项目根目录 |
 | `version_code` | int | `0` | 首次初始化时的已安装版本序号，范围 `0`～`9007199254740991`；已有状态后以状态为准 |
 | `client_key` | string | `''` | 安装实例 ID；空串自动生成。显式值为 8～64 位字母、数字、下划线或短横线，须与已有状态一致 |
 | `machine_id` | string\|null | `null` | `null` 自动探测系统 ID；非空串提供最多 512 字节的稳定实例 ID；`''` 禁用探测并使用持久随机 ID |
@@ -84,12 +98,43 @@ $result = $updater->update();
 | `client_name` | string | `''` | 上报给中心的安装实例名称 |
 | `channel` | string | `'stable'` | 发布渠道：`stable` 或 `beta` |
 | `prefer_delta` | bool | `true` | 条件满足时优先使用更小的增量包；`false` 强制完整包 |
+| `exclude` | string\|string[] | `[]` | 按顺序匹配的排除规则，支持多行文本或字符串数组，见下文 |
+| `hooks` | array<string, callable> | `[]` | `check()` 强制安装、`update()` 和 `rollback()` 共用的默认回调；同名调用参数覆盖配置回调 |
 | `preserve` | string[] | `[]` | 追加保护路径，相对项目根目录；目录包含子路径，不支持通配符 |
 | `max_package_bytes` | int | `2147483648` | 单个 ZIP 的最大下载字节数，正整数，默认 2 GiB |
 | `http` | array | `[]` | HTTP 选项，见下表 |
 | `archive_limits` | array | `[]` | 解压与清单限制，见下表 |
 
 `version_code` 是单调递增的整数，不是显示版本字符串。示例：版本 `1.2.0` 可对应序号 `10200`；显示版本由中心返回，客户端按序号判断新旧。
+
+### `updater.php` 与排除规则
+
+根目录 `updater.php` 返回上述配置数组，不接受 HTTP 参数、不直接执行升级。可以使用环境变量提供密钥，也可填写本地值；包含密钥的配置不要提交 Git。初始化模板见 [`resources/updater.php`](resources/updater.php)。
+
+```php
+'exclude' => [
+    '# 每行一条规则，也可传入多行字符串',
+    '/config/local.php',
+    '/customer-data/',
+    '*.log',
+    'assets/**/local-*.json',
+    '!/assets/default/local-example.json',
+],
+```
+
+| 语法 | 含义 |
+| --- | --- |
+| 空行、以 `#` 开头 | 忽略；每条规则先去掉首尾空白 |
+| `*.log`、`cache/` | 无路径分隔的名称匹配任意层级；尾部 `/` 仅匹配该目录内的文件 |
+| `/config.php` | 开头 `/` 将规则锚定到项目根目录 |
+| `config/local.php` | 包含中间 `/` 的规则也从根目录匹配 |
+| `*`、`?` | 匹配一个路径段内的任意字符、一个字符，不跨 `/` |
+| `**`、`**/` | 跨目录匹配；`**/` 可匹配零层或多层目录 |
+| `!规则` | 取消先前的自定义排除，最后一条匹配规则生效 |
+
+规则不区分大小写，使用 `/` 分隔；不支持反斜杠转义和字符范围语法，`[`、`]` 按普通字符匹配。这里只匹配每个文件的路径，不复刻 Git 的目录遍历规则，因此允许 `cache/` 后用 `!cache/keep.txt` 重新包含文件。
+
+排除同时用于完整包、增量包、本地基准核验和废弃文件清理。内置保护与 `preserve` 优先于所有排除规则，不能通过 `!` 取消；`.updater/`、根 `updater.php` 和实际工作目录始终受保护。回滚按事务中记录的备份恢复，不会因之后修改排除配置而改变原事务。
 
 ### HTTP 选项
 
@@ -136,6 +181,7 @@ $config['archive_limits'] = [
 ├── public/                Web 入口目录
 ├── vendor/
 ├── .env
+├── updater.php            本地配置、排除规则与回调
 └── .updater/              work_dir：私有持久目录，禁止运行缓存清理删除
     ├── state.json         实例 ID、已安装版本与文件基准
     ├── update.lock        跨进程排他锁
@@ -146,13 +192,25 @@ $config['archive_limits'] = [
 
 ZIP 根目录直接映射到 `project_dir`，不能额外套一层项目文件夹。工作目录可以位于项目内，会自动加入保护路径，不参与文件覆盖和废弃清理；也可继续使用原有项目外目录。不能放进 `vendor`、Web 公开目录或会自动清理的临时目录。同一安装的 HTTP、队列和 CLI 必须共用它。
 
+自动创建的 `.updater` 包含 `.gitignore`、Apache `.htaccess` 拒绝规则与 IIS `web.config` 拒绝规则；是否生效取决于服务器配置。Nginx 不读取这两个文件，若项目根可经 HTTP 访问，需要自行添加 `location ^~ /.updater/ { deny all; }`。
+
+新工作目录使用 `0700`，新配置文件使用 `0600`（Windows 按系统 ACL 管理）。Composer 部署账户与 PHP 运行账户不同时，部署时须设置适当属主或 ACL，使 PHP 能读取配置并读写工作目录。
+
 宝塔的 open_basedir 应允许整个应用根目录，网站入口仍设为 public，无需开放父目录。FTP 只需访问应用目录。若项目没有 public 分层、整个项目都可由 HTTP 访问，须先在 Nginx/Apache 禁止访问工作目录，不能依赖目录名字隐藏；FTP 权限不能替代 PHP 运行用户的写权限。
 
 已有安装修改 work_dir 时，先停止更新任务，完整移动原目录内容，再修改配置；不要只新建空目录，否则会丢失已安装版本、文件基准和回滚记录。工作目录不属于可随意清理的运行缓存。
 
 ## Updater API
 
-以下为应用接入的全部公开方法。实例方法共用 `work_dir` 的非阻塞排他锁：其他操作持锁时立即抛异常，不排队。`status()` 和 `getClientKey()` 也取锁。静态方法 `summary()` 不取锁。
+以下为应用接入的全部公开方法。实例方法共用 `work_dir` 的非阻塞排他锁：其他操作持锁时立即抛异常，不排队。`status()` 和 `getClientKey()` 也取锁。静态方法 `summary()` 和配置加载方法 `fromFile()` 不取锁。
+
+### `Updater::fromFile(string $path): Updater`
+
+加载可信的本地 PHP 配置文件并构造实例。`path` 为文件路径；文件必须存在并返回数组，未提供 `project_dir` 时采用配置文件所在目录。相对路径按当前工作目录解析，推荐传绝对路径。加载会执行该 PHP 文件，因此路径不能来自用户输入。构造时创建工作目录，不发业务请求；首次调用身份相关方法时才生成状态。
+
+### `Setup::initialize(string $projectDir): array`
+
+手动初始化入口，也由 Composer 插件和 CLI `init` 调用。`projectDir` 必须是已存在的项目目录。返回 `config_file`、`work_dir` 两个绝对路径，创建缺失的目录、访问保护文件和配置模板，保留已有文件。它不校验已有配置内容，不生成 `client_key`，不自动修改项目 `.gitignore`。既有 `work_dir` 配置仍由应用加载时生效。
 
 ### `getClientKey(): string`
 
@@ -211,14 +269,20 @@ Linux 读取 `/etc/machine-id`，备选 `/var/lib/dbus/machine-id`；Windows 查
 
 不安装文件，也不自动把返回凭证保存到配置。授权产品需在中心配置安装实例、域名、来源 IP 等绑定；`product_key`、`client_key` 和 `upgrade_token` 分别用于产品通信、实例识别和客户在线授权。
 
-### `check(): array`
+### `check(array $hooks = []): array`
 
-检查是否有可获取的新版本。无参数，使用 GET 请求；自动初始化本地状态并登记实例。中心按产品、PHP 目标、渠道、发布状态和更新权益筛选版本。
+检查中心可获取的新版本，业务 API 使用 GET；自动初始化本地状态并登记实例。中心按产品、PHP 目标、渠道、发布状态和更新权益筛选版本。
+
+当 `update=true` 且 `force_update=true` 时，直接同步下载并安装目标版本，不等待第二次调用或用户确认。授权、哈希、增量基准、保护路径、事务锁和回滚规则仍全部执行。`hooks` 与 `update()` 使用同一回调约定。
+
+这不是只读方法：宿主应将入口设为有升级权限的 POST 操作，并处理 CSRF、维护状态和超时。只查看更新说明时可使用 `changelog()`。库不会在 Composer 安装、自动加载或普通页面请求时自行检查；需要自动发现版本时，由应用已有任务周期调用 `check()`。
 
 | 字段 | 类型 | 返回条件与含义 |
 | --- | --- | --- |
-| `update` | bool | 始终返回，有无更新 |
-| `force_update` | bool | 中心v0.15+返回；范围内有强制版本为true，无更新false；宿主决定执行方式 |
+| `update` | bool | 检查时有无更新；强制安装成功后本次仍为 `true`，应结合 `installed` 判断 |
+| `force_update` | bool | 当前已安装版本与目标之间存在适用的强制版本时为 `true`；旧中心省略时补 `false`，非法类型抛异常 |
+| `installed` | bool | 本次检查是否已完成强制安装；普通检查与无更新均为 `false` |
+| `installation` | array | 仅强制安装成功时存在，结构与 `update()` 的安装结果一致 |
 | `status_code` | int | 有更新 `200`，无更新 `304`；这是业务字段，不是 HTTP 状态码 |
 | `license_value` | string\|null | 在线凭证 |
 | `version` | string | 有更新：显示版本 |
@@ -244,7 +308,7 @@ Linux 读取 `/etc/machine-id`，备选 `/var/lib/dbus/machine-id`；Windows 查
 | `manifest_url` | string\|null | 受控清单票据路径 |
 | `manifest_sha256` | string | 清单原始 JSON 字节的 SHA-256 |
 
-增量候选沿用包字段，`package_type=2`，另有整数 `base_package_id` 和 `target_package_id`。`check()` 提交持久状态中的基准 ID；返回候选不表示本地文件已经通过核验，实际选择在 `update()` 内完成。
+增量候选沿用包字段，`package_type=2`，另有整数 `base_package_id` 和 `target_package_id`。`check()` 提交持久状态中的基准 ID；返回候选不表示本地文件已经通过核验，实际选择在安装阶段完成，包括 `check()` 触发的强制安装。
 
 中心可能返回其他元数据；库不使用 `file_full_url` 跨站下载，不执行扩展 `config`。原始结果不能直接交给浏览器或普通日志。授权拒绝、损坏响应和非法包信息会抛异常，不转换成 `update=false`。
 
@@ -263,7 +327,7 @@ $pending = $updater->changelog();
 $history = $updater->changelog('before', 1, 20);
 ```
 
-返回字段：`list: array`、`total: int`、`page: int`、`size: int`、`direction: string`、`current_version_code: int`。`list` 按版本序号倒序，每项包含 `version: string`、`version_code: int`、`changelog: string`、`published_at: string`、`channel: string`；无结果时为 `[]`。
+返回字段：`list: array`、`total: int`、`page: int`、`size: int`、`direction: string`、`current_version_code: int`。`list` 按版本序号倒序，每项包含 `version: string`、`version_code: int`、`changelog: string`、`published_at: string`、`channel: string`、`force_update: bool`；无结果时为 `[]`。
 
 筛选范围与更新检查一致。不下载包、不改变本地版本；首次调用可能初始化本地状态。长日志应减小 `size` 以满足 2 MiB 响应上限；展示时按应用规则转义或过滤 HTML。
 
@@ -275,7 +339,7 @@ $history = $updater->changelog('before', 1, 20);
 
 ```php
 $release = $updater->check();
-if ($release['update']) {
+if ($release['update'] && !$release['installed']) {
     $zipPath = $updater->download($release);
 }
 ```
@@ -329,7 +393,7 @@ if ($release['update'] && ($release['package']['manifest_state'] ?? '') === 'rea
 
 ### `Updater::summary(array $release): array`
 
-静态字段筛选方法，返回输入中存在的 `update`、`status_code`、`version`、`version_code`、`changelog`、`published_at`，并添加 `requirements`（取自 `package.requirements`，缺省 `''`）。
+静态字段筛选方法，返回输入中存在的 `update`、`installed`、`status_code`、`version`、`version_code`、`changelog`、`published_at`，并添加布尔 `force_update`（严格等于 `true` 才为真）和 `requirements`（取自 `package.requirements`，缺省 `''`）。
 
 不包含凭证、票据、包详情或本地备份路径。不验证输入，不取锁；结果用于展示，不能再传给 `download()` 或 `manifest()`。
 
@@ -357,21 +421,21 @@ if ($release['update'] && ($release['package']['manifest_state'] ?? '') === 'rea
 | 本地自建、旧清单未记录、新包未包含 | 保留 |
 | 旧状态没有安装清单 | 完整安装建立基准，不猜测历史文件归属 |
 
-**完整包回退仍会覆盖新包包含的非保护文件，包括本地改动。** 需要长期保留的配置和客户数据应加入 `preserve`。
+**完整包回退仍会覆盖新包包含的非保护文件，包括本地改动。** 需要长期保留的配置和客户数据应加入 `exclude` 或 `preserve`。
 
-默认保护：`.git`、`.env`、`.user.ini`、`runtime`、`storage`、`upload`、`uploads`、`public/upload`、`public/uploads`、`public/storage`；任意层级的 `.git`、`.env`、`.env.*` 也受保护。追加的目录保护所有子路径，路径比较不区分大小写；中心扩展配置不能改写本地保护规则。
+默认保护：根 `.updater`、根 `updater.php`、实际工作目录、`.git`、`.env`、`.user.ini`、`runtime`、`storage`、`upload`、`uploads`、`public/upload`、`public/uploads`、`public/storage`；任意层级的 `.git`、`.env`、`.env.*` 也受保护。追加的目录保护所有子路径，路径比较不区分大小写；中心扩展配置不能改写本地保护规则。
 
 ZIP 文件名使用 UTF-8，支持中文与纯数字文件名。拒绝路径穿越、绝对路径、符号链接、特殊文件、加密条目、重复/大小写冲突、含糊编码及超限 ZIP。文件与目录互换、仅改大小写的已记录路径变更会被拒绝，应单独规划迁移。
 
 ## 回调
 
-`update($hooks)`、`rollback($hooks)` 接受 `array<string, callable>`。每个回调接收一个 `array $release` 版本摘要；返回 `false` 或抛异常视为失败，其他返回值（含无返回值）视为成功。
+`check($hooks)`、`update($hooks)`、`rollback($hooks)` 接受 `array<string, callable>`。默认读取配置的 `hooks`，方法参数按名称覆盖默认回调，未覆盖的保留。每个回调接收一个 `array $release` 版本摘要；返回 `false` 或抛异常视为失败，其他返回值（含无返回值）视为成功。
 
 | 名称 | 所属操作 | 调用时机 |
 | --- | --- | --- |
-| `before_apply` | update | 备份和事务记录已完成，覆盖前 |
-| `after_apply` | update | 文件已更新，版本状态提交前 |
-| `after_commit` | update | 文件和版本已提交 |
+| `before_apply` | check 强制安装 / update | 备份和事务记录已完成，覆盖前 |
+| `after_apply` | check 强制安装 / update | 文件已更新，版本状态提交前 |
+| `after_commit` | check 强制安装 / update | 文件和版本已提交 |
 | `before_rollback` | 显式 rollback | 全部备份校验后，恢复前 |
 | `after_rollback` | 显式 rollback | 文件和版本恢复后 |
 
@@ -491,26 +555,30 @@ $license = OfflineLicense::verify(
 
 ## CLI 与示例
 
-CLI 配置文件返回与构造参数一致的数组，可额外包含 `hooks`。PHP 方法调用应把回调直接传给 `update()` / `rollback()`；构造配置中的 `hooks` 不会自动应用。
+CLI 默认读取当前工作目录的 `updater.php`，可用第二个参数指定配置文件。`init` 的第二个参数是已存在的项目目录，省略时为当前目录。CLI 与 PHP 方法均自动应用配置中的 `hooks`。
 
 ```bash
-php vendor/bin/cli-app-updater check /srv/private/updater.php
-php vendor/bin/cli-app-updater update /srv/private/updater.php
-php vendor/bin/cli-app-updater rollback /srv/private/updater.php
+php vendor/bin/cli-app-updater init
+php vendor/bin/cli-app-updater check
+php vendor/bin/cli-app-updater update
+php vendor/bin/cli-app-updater rollback /srv/shop/updater.php
 ```
 
 | 命令 | 输出 |
 | --- | --- |
+| `init` | 初始化结果 `config_file`、`work_dir`，不要求先填写产品密钥 |
 | `client-key` | `{"client_key":"..."}` |
 | `status` | 本地状态 |
 | `report` | 登记结果 |
 | `authorize` | 授权结果，去掉 `license_value` |
-| `check` | 版本摘要 |
+| `check` | 版本摘要；强制版本会在返回前安装，`installed=true` |
 | `changelog` | 默认 `after / 1 / 10` 日志结果 |
 | `manifest` | 检查后读取目标清单；无更新时返回摘要 |
-| `download` | 完整包摘要及 `downloaded_file`；无更新时返回摘要 |
+| `download` | 先调用 `check()`；普通版本返回完整包摘要及 `downloaded_file`，强制版本安装后仅返回摘要，不重复下载 |
 | `update` | 安装结果；无更新时 `{"update":false}` |
 | `rollback` | `rolled_back=true` 与恢复后的状态 |
+
+`manifest` 也会先执行 `check()`，因此可能触发强制安装。CLI 没有绕过强制更新的检查选项。
 
 输出 JSON；退出码 `0` 成功或无更新，`1` 执行失败，`2` 命令参数错误。
 
@@ -528,6 +596,7 @@ php vendor/bin/cli-app-updater rollback /srv/private/updater.php
 | 登记、授权、更新检查、完整包下载 | v0.13 | `/api/{product_code}`，`action=report/authorize/check/download` |
 | 更新日志 | v0.13.1 | `action=changelog` |
 | 文件清单与增量分发 | v0.14 | `action=manifest`，检查提交 `supports_delta/base_package_id` |
+| 强制更新 | v0.15 | 检查返回布尔 `force_update` |
 
 库固定请求 `platform=php`，并提交已安装版本与配置渠道。产品通信密钥和实例 ID 经请求头传输；下载和清单使用中心签发的同产品相对票据地址，不附带产品密钥，不跟随跨站跳转。检查与下载须使用相同出口 IP，中心会在下载时重新验证授权及包流量额度。
 
@@ -537,4 +606,4 @@ php vendor/bin/cli-app-updater rollback /srv/private/updater.php
 
 `check()` 和 `summary()` 提供布尔值 `force_update`。当前版本之后、可获取的目标版本之前（含目标）存在强制版本时为 true；已安装版本、草稿、撤回、其他渠道/目标或授权截止后的版本不参与判断。没有更新时为 false。`changelog()` 的每条记录提供该版本自己的 force_update。
 
-本库只透传标记，不自动弹窗、阻止业务或在检查时安装。应用决定是否允许跳过、进入维护或调用 update()。旧中心没有字段时，summary() 默认 false。
+`check()` 遇到强制版本会直接同步安装，成功后返回 `installed=true`；普通版本只返回信息。应用负责调用前的维护准备和安装后的进程生效。旧中心未提供字段时按非强制处理。

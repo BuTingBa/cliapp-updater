@@ -64,7 +64,7 @@ function scenario(string $mode = '', array $overrides = []): void
 {
     global $directory;
     Files::writeJson($directory . '/scenario.json', ['mode' => $mode, 'release' => array_replace_recursive([
-        'update' => true, 'force_update' => true, 'status_code' => 200, 'version' => '1.0.0', 'version_code' => 1,
+        'update' => true, 'force_update' => false, 'status_code' => 200, 'version' => '1.0.0', 'version_code' => 1,
         'changelog' => 'fixture', 'published_at' => '2026-10-01 12:00:00', 'license_value' => 'fixture-license',
         'package' => [
             'package_type' => 1, 'platform' => 'php', 'file_name' => 'app.zip',
@@ -138,13 +138,15 @@ try {
     $restricted = 'foreach (glob(' . var_export(dirname(__DIR__) . '/src/*.php', true) . ') as $file) { require_once $file; } '
         . '$config = ' . var_export($config, true) . '; ini_set("open_basedir", $config["project_dir"]); '
         . '$u = new \\BuTing\\CliAppUpdater\\Updater($config); $u->update(); $u->rollback(); echo "restricted-ok";';
-    $restrictedProcess = testProcess([PHP_BINARY, '-r', $restricted], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $restrictedPipes, $root);
+    // PHP 7.2 Windows uses a command string; a file preserves quotes, percent signs and UTF-8.
+    Files::write($directory . '/restricted.php', '<?php ' . $restricted);
+    $restrictedProcess = testProcess([PHP_BINARY, $directory . '/restricted.php'], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $restrictedPipes, $root);
     fclose($restrictedPipes[0]);
     $restrictedOutput = stream_get_contents($restrictedPipes[1]);
     $restrictedError = stream_get_contents($restrictedPipes[2]);
     fclose($restrictedPipes[1]);
     fclose($restrictedPipes[2]);
-    expect(proc_close($restrictedProcess) === 0 && $restrictedOutput === 'restricted-ok' && $restrictedError === '', 'Update and rollback work with project-only open_basedir');
+    expect(proc_close($restrictedProcess) === 0 && $restrictedOutput === 'restricted-ok' && $restrictedError === '', 'Update and rollback work with project-only open_basedir: ' . $restrictedError . $restrictedOutput);
     expect($updater->check()['update'], 'check initializes the installation without a preceding status call');
     $lastRequest = file_get_contents($directory . '/request.json');
     $clientKey = $updater->getClientKey();
@@ -189,7 +191,7 @@ try {
     expect($request['body']['domain'] === 'example.com' && $request['method'] === 'POST', 'Report normalizes domain and sends JSON');
     expect($updater->authorize()['authorized'] === true, 'Authorize works');
     $release = $updater->check();
-    expect(Updater::summary($release)['force_update'] === true, 'Safe summary retains forced-update metadata');
+    expect(Updater::summary($release)['force_update'] === false, 'Safe summary retains forced-update metadata');
     expect(Updater::summary(['update' => false])['force_update'] === false, 'Older server metadata defaults to non-forced');
     $request = Files::json($directory . '/request.json');
     expect($request['path'] === '/api/' . rawurlencode($config['product_code']), 'Product code encoded exactly once');
@@ -435,6 +437,7 @@ try {
         && $call('status')['data']['version_code'] === 0, 'Failed HTTP health hook restores files and version');
     $call('unsupported', 500);
 
+    require __DIR__ . '/defaults.php';
     require __DIR__ . '/delta.php';
 
     if (function_exists('sodium_crypto_sign_keypair')) {
