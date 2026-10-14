@@ -42,7 +42,7 @@ try {
         $result = $updater->$command();
         unset($result['license_value']);
     }
-    echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+    echo \BuTing\CliAppUpdater\Json::encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
 } catch (Throwable $error) {
     // No stack traces, request headers, API responses or nested hook errors in routine CLI output.
     fwrite(STDERR, $error->getMessage() . "\n");

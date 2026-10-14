@@ -17,10 +17,10 @@ $updater = new Updater(require __DIR__ . '/config.php');
 try {
     $release = $updater->check(); // 无须先调用 status()；没有实例 ID 会自动生成。
     // 确认应用维护流程已接入后，安装可直接调用 $updater->update()，不必预先手工下载。
-    echo json_encode([
+    echo \BuTing\CliAppUpdater\Json::encode([
         'client_key' => $updater->getClientKey(), // 可在后台显示给客户，用于申请授权。
         'release' => Updater::summary($release), // 去掉下载票据和授权凭证后再展示。
-    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . "\n";
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n";
 } catch (Throwable $error) {
     // 即使平台拒绝更新，也能单独 getClientKey() 取得标识，用于申请授权。
     fwrite(STDERR, $error->getMessage() . "\n");

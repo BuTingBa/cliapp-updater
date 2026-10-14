@@ -9,13 +9,20 @@ use RuntimeException;
 
 final class Updater
 {
-    private array $config;
-    private string $work;
-    private string $root;
-    private HttpClient $http;
-    private Installer $installer;
-    private bool $machineRead = false;
-    private ?string $machineId = null;
+    /** @var array */
+    private $config;
+    /** @var string */
+    private $work;
+    /** @var string */
+    private $root;
+    /** @var HttpClient */
+    private $http;
+    /** @var Installer */
+    private $installer;
+    /** @var bool */
+    private $machineRead = false;
+    /** @var string|null */
+    private $machineId = null;
 
     public function __construct(array $config)
     {

@@ -41,7 +41,7 @@ function releaseFixture(int $id, array $contents, ?array $base = null, ?callable
         if ($mutate) {
             $mutate($document, $zip);
         }
-        $zip->addFromString('update.json', json_encode($document, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));
+        $zip->addFromString('update.json', \BuTing\CliAppUpdater\Json::encode($document, JSON_UNESCAPED_UNICODE));
         $zip->close();
         clearstatcache();
         $release['delta_package'] = array_replace($release['package'], [
@@ -91,7 +91,7 @@ expect($deltaUpdater->status()['package_id'] === 10 && file_get_contents($deltaR
 $deltaCliConfig = $directory . '/delta-crash.php';
 Files::write($deltaCliConfig, '<?php $config = ' . var_export($deltaConfig, true)
     . '; $config["hooks"]["after_apply"] = static function () { exit(7); }; return $config;');
-$crash = proc_open([PHP_BINARY, dirname(__DIR__) . '/bin/cli-app-updater', 'update', $deltaCliConfig],
+$crash = testProcess([PHP_BINARY, dirname(__DIR__) . '/bin/cli-app-updater', 'update', $deltaCliConfig],
     [0 => ['pipe', 'r'], 1 => ['file', $directory . '/delta-crash.log', 'a'], 2 => ['file', $directory . '/delta-crash.log', 'a']], $crashPipes);
 fclose($crashPipes[0]);
 expect(proc_close($crash) === 7 && !is_file($deltaRoot . '/obsolete.php'), 'Delta process can terminate after deletion but before state commit');

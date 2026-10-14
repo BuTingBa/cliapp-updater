@@ -10,10 +10,14 @@ use ZipArchive;
 /** File transaction only. Database migrations and process reloads belong to the host application. */
 final class Installer
 {
-    private string $root;
-    private string $work;
-    private array $preserve;
-    private array $limits;
+    /** @var string */
+    private $root;
+    /** @var string */
+    private $work;
+    /** @var array */
+    private $preserve;
+    /** @var array */
+    private $limits;
 
     public function __construct(string $root, string $work, array $preserve = [], array $limits = [])
     {
@@ -267,7 +271,7 @@ final class Installer
                 if (!$metadata || $metadata['size'] > 16777216) {
                     throw new RuntimeException('Missing or oversized delta metadata');
                 }
-                $document = json_decode($zip->getFromName('update.json'), true, 64, JSON_THROW_ON_ERROR);
+                $document = Json::decode($zip->getFromName('update.json'));
                 if (!is_array($document) || ($document['schema'] ?? '') !== 'apps.delta.v1'
                     || ($document['base_package_id'] ?? null) !== $delta['base_package_id']
                     || ($document['target_package_id'] ?? null) !== $delta['target_package_id']

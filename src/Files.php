@@ -62,7 +62,7 @@ final class Files
 
     public static function json(string $path): array
     {
-        $value = json_decode((string) file_get_contents($path), true, 64, JSON_THROW_ON_ERROR);
+        $value = Json::decode((string) file_get_contents($path));
         if (!is_array($value)) {
             throw new RuntimeException('Expected a JSON object: ' . $path);
         }
@@ -71,7 +71,7 @@ final class Files
 
     public static function writeJson(string $path, array $value): void
     {
-        self::write($path, json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n");
+        self::write($path, Json::encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
     }
 
     public static function write(string $path, string $content, int $mode = 0600): void

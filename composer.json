@@ -1,6 +1,7 @@
 {
     "name": "buting/cliapp-updater",
     "description": "Framework-independent PHP updater for the apps.cli.cc release and licensing service",
+    "keywords": ["php", "updater", "incremental-update", "rollback", "thinkphp", "webman"],
     "homepage": "https://github.com/BuTingBa/cliapp-updater",
     "support": {
         "source": "https://github.com/BuTingBa/cliapp-updater",
@@ -10,7 +11,7 @@
     "license": "proprietary",
     "authors": [{"name": "BuTing"}],
     "require": {
-        "php": "^7.4 || ^8.0",
+        "php": ">=7.2",
         "php-64bit": "*",
         "ext-curl": "*",
         "ext-hash": "*",

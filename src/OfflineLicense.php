@@ -22,7 +22,7 @@ final class OfflineLicense
         if ($public === false || strlen($public) !== SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES) {
             throw new RuntimeException('Invalid trusted public key');
         }
-        $envelope = json_decode($document, true, 16, JSON_THROW_ON_ERROR);
+        $envelope = Json::decode($document, 16);
         if (!is_array($envelope) || ($envelope['algorithm'] ?? '') !== 'Ed25519'
             || ($envelope['key_id'] ?? '') !== hash('sha256', $public)
             || !is_string($envelope['payload'] ?? null) || !is_string($envelope['signature'] ?? null)) {
@@ -34,7 +34,7 @@ final class OfflineLicense
             || !sodium_crypto_sign_verify_detached($signature, $payload, $public)) {
             throw new RuntimeException('Invalid license signature');
         }
-        $license = json_decode($payload, true, 16, JSON_THROW_ON_ERROR);
+        $license = Json::decode($payload, 16);
         if (!is_array($license) || ($license['schema'] ?? '') !== 'apps.update-license.v1'
             || ($license['key_id'] ?? '') !== $envelope['key_id'] || ($license['product_code'] ?? '') !== $productCode
             || !is_string($license['license_id'] ?? null) || !is_array($license['constraints'] ?? null)

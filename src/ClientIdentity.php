@@ -42,6 +42,10 @@ final class ClientIdentity
         if (!is_callable('proc_open')) {
             return '';
         }
+        // Array commands require PHP 7.4. These arguments are fixed local reg.exe options.
+        if (PHP_VERSION_ID < 70400) {
+            $command = implode(' ', array_map('escapeshellarg', $command));
+        }
         $process = @proc_open($command, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes,
             null, null, ['bypass_shell' => true, 'create_no_window' => true]);
         if (!is_resource($process)) {

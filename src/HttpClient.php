@@ -9,8 +9,10 @@ use RuntimeException;
 /** Native cURL transport. Credentials are sent only to the configured API origin. */
 final class HttpClient
 {
-    private string $baseUrl;
-    private array $options;
+    /** @var string */
+    private $baseUrl;
+    /** @var array */
+    private $options;
 
     public function __construct(string $baseUrl, array $options = [])
     {
@@ -42,12 +44,12 @@ final class HttpClient
             }
             $body .= $chunk;
             return strlen($chunk);
-        }, $post ? json_encode($data, JSON_THROW_ON_ERROR) : null, $this->options['timeout']);
+        }, $post ? Json::encode($data) : null, $this->options['timeout']);
         if ($status < 200 || $status >= 300) {
             // Do not echo server bodies: they may contain keys, tokens or HTML debug traces.
             throw new RuntimeException('API request rejected (HTTP ' . $status . ')', $status);
         }
-        $response = json_decode($body, true, 64, JSON_THROW_ON_ERROR);
+        $response = Json::decode($body);
         if (!is_array($response) || ($response['status'] ?? null) !== 1 || !is_array($response['data'] ?? null)) {
             throw new RuntimeException('API returned an invalid or unsuccessful response');
         }
@@ -105,7 +107,7 @@ final class HttpClient
         if ($status !== 200 || !hash_equals($sha256, hash('sha256', $body))) {
             throw new RuntimeException('Manifest download rejected or SHA-256 mismatch', $status === 200 ? 0 : $status);
         }
-        $document = json_decode($body, true, 64, JSON_THROW_ON_ERROR);
+        $document = Json::decode($body);
         if (!is_array($document) || ($document['schema'] ?? '') !== 'apps.manifest.v1' || !is_array($document['files'] ?? null)) {
             throw new RuntimeException('Invalid package manifest');
         }
@@ -162,7 +164,10 @@ final class HttpClient
             }
             return (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
         } finally {
-            curl_close($curl);
+            // PHP 8 uses CurlHandle objects; explicit close is unnecessary and deprecated in 8.5.
+            if (PHP_VERSION_ID < 80000) {
+                curl_close($curl);
+            }
         }
     }
 }

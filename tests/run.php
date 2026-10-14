@@ -18,6 +18,15 @@ set_error_handler(static function (int $severity, string $message, string $file,
 });
 
 $checks = 0;
+// Keep the test process launcher compatible with the package's minimum PHP version.
+function testProcess(array $command, array $descriptors, &$pipes, ?string $cwd = null, ?array $env = null, array $options = [])
+{
+    if (PHP_VERSION_ID < 70400) {
+        $command = implode(' ', array_map('escapeshellarg', $command));
+    }
+    return proc_open($command, $descriptors, $pipes, $cwd, $env, $options + ['bypass_shell' => true]);
+}
+
 function expect(bool $condition, string $message): void
 {
     global $checks;
@@ -72,6 +81,13 @@ $process = null;
 $httpProcess = null;
 $failure = null;
 try {
+    expect(\BuTing\CliAppUpdater\Json::decode('null') === null, 'Valid JSON null is distinguished from decoding failure');
+    rejects(static function (): void { \BuTing\CliAppUpdater\Json::decode('{'); }, 'Malformed JSON fails on every PHP version');
+    rejects(static function (): void { \BuTing\CliAppUpdater\Json::encode(['invalid' => "\xff"]); }, 'Invalid UTF-8 encoding fails on every PHP version');
+    $recursive = [];
+    $recursive['self'] = &$recursive;
+    rejects(static function () use ($recursive): void { \BuTing\CliAppUpdater\Json::encode($recursive); }, 'Recursive data cannot be persisted as JSON');
+    unset($recursive);
     $root = Files::directory($directory . '/app');
     Files::write($root . '/index.php', 'old-code');
     Files::write($root . '/.env', 'local-secret');
@@ -84,7 +100,7 @@ try {
     fclose($socket);
     $environment = getenv();
     $environment['UPDATER_TEST_DIRECTORY'] = $directory;
-    $process = proc_open([PHP_BINARY, '-S', $address, __DIR__ . '/router.php'], [
+    $process = testProcess([PHP_BINARY, '-S', $address, __DIR__ . '/router.php'], [
         0 => ['pipe', 'r'], 1 => ['file', $directory . '/server.log', 'a'], 2 => ['file', $directory . '/server.log', 'a'],
     ], $pipes, __DIR__, $environment, ['bypass_shell' => true]);
     fclose($pipes[0]);
@@ -292,7 +308,7 @@ try {
     }, 'State cannot be reused by another product');
     $cliConfig = $directory . '/cli.php';
     Files::write($cliConfig, '<?php return ' . var_export($config, true) . ';');
-    $cli = proc_open([PHP_BINARY, dirname(__DIR__) . '/bin/cli-app-updater', 'check', $cliConfig],
+    $cli = testProcess([PHP_BINARY, dirname(__DIR__) . '/bin/cli-app-updater', 'check', $cliConfig],
         [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $cliPipes);
     fclose($cliPipes[0]);
     $cliOutput = stream_get_contents($cliPipes[1]);
@@ -304,7 +320,7 @@ try {
         && strpos($cliOutput, '/download/') === false, 'CLI prints useful metadata without credentials');
     Files::write($cliConfig, '<?php $config = ' . var_export($config, true)
         . '; $config["hooks"]["after_apply"] = static function () { exit(7); }; return $config;');
-    $crash = proc_open([PHP_BINARY, dirname(__DIR__) . '/bin/cli-app-updater', 'update', $cliConfig],
+    $crash = testProcess([PHP_BINARY, dirname(__DIR__) . '/bin/cli-app-updater', 'update', $cliConfig],
         [0 => ['pipe', 'r'], 1 => ['file', $directory . '/crash.log', 'a'], 2 => ['file', $directory . '/crash.log', 'a']], $crashPipes);
     fclose($crashPipes[0]);
     expect(proc_close($crash) === 7, 'Installer process exits before version commit without running finally');
@@ -329,7 +345,7 @@ try {
         if (isset($example[1])) {
             $arguments[] = $example[1];
         }
-        $demo = proc_open($arguments, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', $directory . '/demo.log', 'a']], $demoPipes);
+        $demo = testProcess($arguments, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', $directory . '/demo.log', 'a']], $demoPipes);
         fclose($demoPipes[0]);
         $result = json_decode(stream_get_contents($demoPipes[1]), true);
         fclose($demoPipes[1]);
@@ -346,7 +362,7 @@ try {
     $httpAddress = stream_socket_get_name($socket, false);
     fclose($socket);
     $disabled = 'exec,shell_exec,proc_open,popen,system,passthru,pcntl_exec,fastcgi_finish_request';
-    $httpProcess = proc_open([PHP_BINARY, '-d', 'disable_functions=' . $disabled,
+    $httpProcess = testProcess([PHP_BINARY, '-d', 'disable_functions=' . $disabled,
         '-S', $httpAddress, __DIR__ . '/http-router.php'], [
         0 => ['pipe', 'r'], 1 => ['file', $directory . '/http.log', 'a'], 2 => ['file', $directory . '/http.log', 'a'],
     ], $httpPipes, __DIR__, $environment, ['bypass_shell' => true]);
@@ -368,9 +384,11 @@ try {
         try {
             $body = curl_exec($curl);
             expect($body !== false && curl_getinfo($curl, CURLINFO_HTTP_CODE) === $expectedStatus, 'HTTP action: ' . $action);
-            return json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+            return \BuTing\CliAppUpdater\Json::decode($body, 512);
         } finally {
-            curl_close($curl);
+            if (PHP_VERSION_ID < 80000) {
+                curl_close($curl);
+            }
         }
     };
     $response = $call('check');
@@ -403,7 +421,7 @@ try {
         $pair = sodium_crypto_sign_keypair();
         $public = sodium_crypto_sign_publickey($pair);
         $secret = sodium_crypto_sign_secretkey($pair);
-        $payload = json_encode([
+        $payload = \BuTing\CliAppUpdater\Json::encode([
             'schema' => 'apps.update-license.v1', 'key_id' => hash('sha256', $public),
             'license_id' => '1', 'product_code' => $config['product_code'], 'issued_at' => '2025-01-01T00:00:00+08:00',
             'updates_until' => '2025-02-01T00:00:00+08:00',
@@ -411,12 +429,12 @@ try {
         ]);
         $envelope = ['algorithm' => 'Ed25519', 'key_id' => hash('sha256', $public), 'payload' => base64_encode($payload),
             'signature' => base64_encode(sodium_crypto_sign_detached($payload, $secret))];
-        $document = json_encode($envelope);
+        $document = \BuTing\CliAppUpdater\Json::encode($envelope);
         $license = OfflineLicense::verify($document, base64_encode($public), $config['product_code'], $initial['client_key'], 'Example.COM.', '2025-01-31T23:59:59+08:00');
         expect($license['license_id'] === '1', 'Expired update cutoff still allows an eligible historical release');
         foreach ([['date' => '2025-02-02T00:00:00+08:00'], ['key' => base64_encode(random_bytes(32))],
             ['client' => 'wrong_client'], ['domain' => 'wrong.example.com'], ['product' => 'wrong-product'],
-            ['document' => json_encode(array_replace($envelope, ['payload' => base64_encode($payload . ' ')]))]] as $bad) {
+            ['document' => \BuTing\CliAppUpdater\Json::encode(array_replace($envelope, ['payload' => base64_encode($payload . ' ')]))]] as $bad) {
             rejects(static function () use ($bad, $document, $public, $config, $initial): void {
                 OfflineLicense::verify($bad['document'] ?? $document, $bad['key'] ?? base64_encode($public),
                     $bad['product'] ?? $config['product_code'], $bad['client'] ?? $initial['client_key'],

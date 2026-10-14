@@ -21,8 +21,8 @@ try {
         };
     }
     $data = $handler(new BuTing\CliAppUpdater\Updater($config), $action, $hooks);
-    echo json_encode(['data' => $data, 'sapi' => PHP_SAPI, 'disabled' => ini_get('disable_functions')], JSON_THROW_ON_ERROR);
+    echo \BuTing\CliAppUpdater\Json::encode(['data' => $data, 'sapi' => PHP_SAPI, 'disabled' => ini_get('disable_functions')]);
 } catch (Throwable $error) {
     http_response_code(500);
-    echo json_encode(['error' => $error->getMessage()], JSON_THROW_ON_ERROR);
+    echo \BuTing\CliAppUpdater\Json::encode(['error' => $error->getMessage()]);
 }
