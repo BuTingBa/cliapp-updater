@@ -189,7 +189,7 @@ final class Updater
         $state = $this->state();
         $package = $release['package'];
         $delta = $this->selectDelta($release, $state);
-        $targetFiles = $delta === null ? null : $this->readManifest($package)['files'];
+        $targetFiles = ($package['manifest_state'] ?? '') === 'ready' ? $this->readManifest($package)['files'] : null;
         $archive = $this->downloadPackage(['package' => $delta ?? $package]);
         try {
             $baseSha256 = $state['package_sha256'] ?? '';
@@ -205,7 +205,7 @@ final class Updater
             ];
             // Installer reads the old baseline for recovery and builds the new one; do not retain a third copy.
             unset($state['installed_files']);
-            return $this->installer->install($archive, self::summary($release), $state, $hooks, $context, $targetFiles)
+            return $this->installer->install($archive, self::summary($release) + ['config' => self::packageConfig($release)], $state, $hooks, $context, $targetFiles)
                 + ['package_type' => $delta === null ? 1 : 2];
         } finally {
             if (is_file($archive)) {
@@ -229,6 +229,24 @@ final class Updater
     {
         return array_intersect_key($release, array_flip(['update', 'installed', 'status_code', 'version', 'version_code', 'changelog', 'published_at']))
             + ['force_update' => ($release['force_update'] ?? false) === true, 'requirements' => $release['package']['requirements'] ?? ''];
+    }
+
+    /** Decode the center's full-package extension object; never execute or merge it into local settings. */
+    public static function packageConfig(array $release): array
+    {
+        $config = $release['package']['config'] ?? null;
+        if ($config === null || $config === '') {
+            return [];
+        }
+        // Center DTOs expose the JSON object as text. Reject arrays/scalars instead of coercing them.
+        if (!is_string($config) || substr(ltrim($config), 0, 1) !== '{') {
+            throw new RuntimeException('Package config must be a JSON object');
+        }
+        $decoded = Json::decode($config);
+        if (!is_array($decoded)) {
+            throw new RuntimeException('Package config must be a JSON object');
+        }
+        return $decoded;
     }
 
     private function checkUpdate(): array
@@ -261,6 +279,7 @@ final class Updater
             throw new RuntimeException('Expected a PHP release with package metadata');
         }
         $this->validatePackage($release['package'], 1);
+        self::packageConfig($release);
     }
 
     private function validatePackage(array $package, int $type): void

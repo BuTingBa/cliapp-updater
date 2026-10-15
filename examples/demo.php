@@ -27,6 +27,8 @@ try {
         },
         'after_apply' => static function (array $release): void {
             // 文件已覆盖，版本尚未提交。接入应用实际迁移和健康检查。
+            // $release['config'] 为目标完整包的扩展参数数组，例如 migration_required。
+            // 业务自行验证字段后调用固定的本地方法，不执行远端参数中的命令或代码。
             // 检查失败可 throw new RuntimeException('健康检查失败');，文件会自动恢复。
             fwrite(STDERR, "文件已覆盖；应用迁移和健康检查由接入方实现。\n");
         },

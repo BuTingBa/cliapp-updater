@@ -36,12 +36,17 @@ final class Files
         return $path;
     }
 
-    public static function target(string $root, string $relative): string
+    /** Optional parent cache is confined to one read-only scan; never reuse it for mutations. */
+    public static function target(string $root, string $relative, ?array &$parents = null): string
     {
         self::relative($relative);
         $path = $root;
+        $target = $root . '/' . $relative;
         foreach (explode('/', $relative) as $part) {
             $path .= '/' . $part;
+            if ($path !== $target && isset($parents[$path])) {
+                continue;
+            }
             if (is_link($path)) {
                 throw new RuntimeException('Symbolic links are not update targets: ' . $relative);
             }
@@ -49,6 +54,9 @@ final class Files
                 $actual = str_replace('\\', '/', (string) realpath($path));
                 if (!self::within($actual, $root)) {
                     throw new RuntimeException('Target escapes project directory: ' . $relative);
+                }
+                if ($parents !== null && $path !== $target && is_dir($path)) {
+                    $parents[$path] = true;
                 }
             }
         }
@@ -105,6 +113,24 @@ final class Files
         } finally {
             fclose($input);
         }
+    }
+
+    /** Move verified staging output on the same device; otherwise use target-local atomic replacement. */
+    public static function install(string $source, string $target, int $mode): void
+    {
+        self::directory(dirname($target), 0755);
+        $from = stat($source);
+        $to = stat(dirname($target));
+        if ($from !== false && $to !== false && $from['dev'] === $to['dev']) {
+            if (!chmod($source, $mode)) {
+                throw new RuntimeException('Cannot set file permissions: ' . $target);
+            }
+            if (@rename($source, $target)) {
+                return;
+            }
+        }
+        // Never unlink the destination first: failed replacement must leave a recoverable file.
+        self::copy($source, $target, $mode);
     }
 
     private static function replace(string $path, callable $write, int $mode): void

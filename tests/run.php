@@ -193,6 +193,17 @@ try {
     $release = $updater->check();
     expect(Updater::summary($release)['force_update'] === false, 'Safe summary retains forced-update metadata');
     expect(Updater::summary(['update' => false])['force_update'] === false, 'Older server metadata defaults to non-forced');
+    expect(Updater::packageConfig($release) === ['command' => 'must not execute'], 'Raw center extension JSON is available as data');
+    expect(!isset(Updater::summary($release)['config']), 'Display summary does not expose arbitrary extension data');
+    foreach ([null, '', '{}'] as $emptyConfig) {
+        expect(Updater::packageConfig(['package' => ['config' => $emptyConfig]]) === [], 'Empty extension object remains compatible');
+    }
+    expect(Updater::packageConfig(['package' => ['config' => '{"migration":true,"nested":{"count":2},"optional":null}']])
+        === ['migration' => true, 'nested' => ['count' => 2], 'optional' => null], 'Extension values keep nested JSON types');
+    foreach (['[]', 'null', '{', '1', '{"x":}', ['x' => 1]] as $badConfig) {
+        rejects(static function () use ($badConfig): void { Updater::packageConfig(['package' => ['config' => $badConfig]]); },
+            'Invalid extension configuration fails explicitly');
+    }
     $request = Files::json($directory . '/request.json');
     expect($request['path'] === '/api/' . rawurlencode($config['product_code']), 'Product code encoded exactly once');
     expect($request['query']['action'] === 'check' && $request['query']['platform'] === 'php' && $request['query']['os_info']['php'] === PHP_VERSION, 'Canonical target and PHP environment');
@@ -218,10 +229,12 @@ try {
     foreach (['before_apply', 'after_apply', 'after_commit'] as $name) {
         $hooks[$name] = static function (array $data) use (&$events, $name): void {
             expect(!isset($data['license_value'], $data['package']), 'Hooks receive no credentials or download ticket');
+            expect($data['config'] === ['command' => 'must not execute'], 'Hooks receive parsed extension data');
             $events[] = $name;
         };
     }
     $installed = $updater->update($hooks);
+    expect($installed['config'] === ['command' => 'must not execute'], 'Installation result exposes parsed full-package extension config');
     expect($events === ['before_apply', 'after_apply', 'after_commit'], 'Hooks execute in deployment order');
     expect(file_get_contents($root . '/index.php') === 'new-code' && is_file($root . '/nested/new.php'), 'Update replaces code and adds files');
     expect(file_get_contents($root . '/.env') === 'local-secret'

@@ -68,11 +68,15 @@ expect(file_get_contents($deltaRoot . '/中文目录/说明.txt') === '中文第
 $targetContents = ['index.php' => 'target', 'unchanged.bin' => $baseContents['unchanged.bin'],
     'new.php' => 'new file', '中文目录/说明.txt' => '中文第二版'];
 $target = releaseFixture(20, $targetContents, $base);
+$withDeltaConfig = Files::json($directory . '/scenario.json');
+$withDeltaConfig['release']['delta_package']['config'] = '{"delta_container":"not application config"}';
+Files::writeJson($directory . '/scenario.json', $withDeltaConfig);
 expect($deltaUpdater->manifest($deltaUpdater->check())['files'] === $target['files'], 'Controlled manifest endpoint returns verified file details');
 $request = Files::json($directory . '/request.json');
 expect($request['query']['action'] === 'manifest' && $request['product_key'] === '', 'Manifest request uses its ticket without sending product secrets');
 $result = $deltaUpdater->update();
 expect($result['package_type'] === 2 && file_get_contents($deltaRoot . '/index.php') === 'target', 'Exact baseline selects and installs the smaller delta');
+expect($result['config'] === Updater::packageConfig($target['release']), 'Delta installation exposes target full-package configuration');
 expect(!is_file($deltaRoot . '/obsolete.php') && !is_file($deltaRoot . '/edited.php'), 'Delta removes only obsolete tracked files');
 expect(!is_file($deltaRoot . '/123'), 'Numeric filenames from PHP-generated deletion metadata are supported');
 expect(file_get_contents($deltaRoot . '/private-user.txt') === 'customer data'

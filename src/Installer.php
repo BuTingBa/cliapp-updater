@@ -20,6 +20,10 @@ final class Installer
     private $limits;
     /** @var IgnoreRules */
     private $exclude;
+    /** @var array<string, float> Durations for this installation only. */
+    private $timings = [];
+    /** @var float */
+    private $clock;
 
     public function __construct(string $root, string $work, array $preserve = [], array $limits = [], $exclude = [])
     {
@@ -59,11 +63,12 @@ final class Installer
             || !preg_match('/^[a-f0-9]{64}$/D', $state['package_sha256'] ?? '')) {
             return false;
         }
+        $parents = [];
         foreach (Manifest::files($state['installed_files'], $this->limits) as $path => $file) {
             if ($this->protected((string) $path)) {
                 continue;
             }
-            $target = Files::target($this->root, (string) $path);
+            $target = Files::target($this->root, (string) $path, $parents);
             if (!is_file($target) || filesize($target) !== $file['size'] || !hash_equals($file['sha256'], hash_file('sha256', $target))) {
                 return false;
             }
@@ -73,6 +78,8 @@ final class Installer
 
     public function install(string $archive, array $release, array $state, array $hooks = [], ?array $delta = null, ?array $targetFiles = null): array
     {
+        $this->timings = [];
+        $this->clock = microtime(true);
         $this->assertReady();
         $id = gmdate('YmdHis') . '-' . bin2hex(random_bytes(6));
         $stage = Files::directory($this->work . '/stage-' . $id);
@@ -84,12 +91,17 @@ final class Installer
                 throw new RuntimeException('Delta baseline changed before installation; check for updates again');
             }
             $oldFiles = Manifest::files($previous['installed_files'] ?? [], $this->limits);
-            $entries = $this->extract($archive, $stage, $delta, $oldFiles, $backup);
-            $files = $delta === null ? [] : $oldFiles;
-            foreach ($entries as $path => $entry) {
-                $files[$path] = ['size' => $entry['size'], 'sha256' => $entry['sha256'],
-                    'mode' => ($entry['mode'] & 0111) ? 0755 : 0644];
+            if ($targetFiles !== null) {
+                Manifest::files($targetFiles, $this->limits);
             }
+            $this->checkpoint('baseline');
+            [$entries, $packageFiles, $unchanged] = $this->extract($archive, $stage, $delta, $oldFiles, $backup, $targetFiles);
+            $extracted = count($entries);
+            $files = $delta === null ? [] : $oldFiles;
+            foreach ($packageFiles as $path => $file) {
+                $files[$path] = $file;
+            }
+            unset($packageFiles);
             $deleted = $delta === null ? array_keys(array_diff_key($oldFiles, $files)) : $delta['deleted'];
             $retained = [];
             foreach ($deleted as $path) {
@@ -117,24 +129,27 @@ final class Installer
             if ($targetFiles !== null) {
                 $expected = array_filter($targetFiles, function ($path): bool { return !$this->protected((string) $path); }, ARRAY_FILTER_USE_KEY);
                 if (count($expected) !== count($files) || array_diff_key($expected, $files)) {
-                    throw new RuntimeException('Delta result does not match target manifest');
+                    throw new RuntimeException('Installation result does not match target manifest');
                 }
                 foreach ($expected as $path => $file) {
                     if ($file['size'] !== $files[$path]['size'] || $file['sha256'] !== $files[$path]['sha256'] || $file['mode'] !== $files[$path]['mode']) {
-                        throw new RuntimeException('Delta result differs from target file: ' . $path);
+                        throw new RuntimeException('Installation result differs from target file: ' . $path);
                     }
                 }
             }
-            $unchanged = 0;
-            foreach ($entries as $path => $entry) {
-                $target = Files::target($this->root, (string) $path);
-                // Existing permissions are intentionally preserved, including for unchanged files.
-                if (empty($entry['delete']) && is_file($target) && filesize($target) === $entry['size']
-                    && hash_equals($entry['sha256'], hash_file('sha256', $target))) {
-                    unset($entries[$path]);
-                    $unchanged++;
+            // Without a manifest the hashes become available only after extraction.
+            if ($delta === null && $targetFiles === null) {
+                foreach ($entries as $path => $entry) {
+                    $target = Files::target($this->root, (string) $path);
+                    // Existing permissions are intentionally preserved, including for unchanged files.
+                    if (empty($entry['delete']) && is_file($target) && filesize($target) === $entry['size']
+                        && hash_equals($entry['sha256'], hash_file('sha256', $target))) {
+                        unset($entries[$path]);
+                        $unchanged++;
+                    }
                 }
             }
+            unset($expected, $targetFiles, $files, $oldFiles);
             $createdDirectories = [];
             $backupBytes = 0;
             foreach ($entries as $relative => &$entry) {
@@ -178,6 +193,7 @@ final class Installer
             // Persist the complete recovery plan BEFORE changing the first application file.
             Files::writeJson($this->work . '/transaction.json', $transaction);
             $recorded = true;
+            $this->checkpoint('plan_backup');
             try {
                 self::hook($hooks, 'before_apply', $release);
                 foreach ($entries as $relative => $entry) {
@@ -188,10 +204,11 @@ final class Installer
                             throw new RuntimeException('Cannot delete obsolete file: ' . $relative);
                         }
                     } else {
-                        Files::copy($stage . '/' . $entry['source'], $target, $entry['old_mode'] ?? $entry['mode']);
+                        Files::install($stage . '/' . $entry['source'], $target, $entry['old_mode'] ?? $entry['mode']);
                     }
                 }
                 self::hook($hooks, 'after_apply', $release);
+                $this->checkpoint('apply');
                 Files::writeJson($this->work . '/state.json', $state);
                 $transaction['status'] = 'complete';
                 Files::writeJson($this->work . '/transaction.json', $transaction);
@@ -209,16 +226,18 @@ final class Installer
                 Files::removeTree($backup);
             }
         }
+        $this->checkpoint('commit_cleanup');
         // A reload failure does not invalidate the already committed version or undo database work.
         try {
             self::hook($hooks, 'after_commit', $release);
         } catch (\Throwable $error) {
             throw new RuntimeException('Update is installed, but after_commit failed; finish cache/process/maintenance handling manually', 0, $error);
         }
+        $this->checkpoint('after_commit');
         $deletedCount = count(array_filter($entries, static function (array $entry): bool { return !empty($entry['delete']); }));
         return $release + ['backup_dir' => $backup, 'retained_files' => $retained, 'unchanged_files' => $unchanged,
             'updated_files' => count($entries) - $deletedCount,
-            'deleted_files' => $deletedCount];
+            'deleted_files' => $deletedCount, 'extracted_files' => $extracted, 'timings' => $this->timings];
     }
 
     public function rollback(array $hooks = []): void
@@ -276,8 +295,14 @@ final class Installer
         self::hook($hooks, 'after_rollback', $transaction['release']);
     }
 
-    private function extract(string $archive, string $stage, ?array &$delta, array $oldFiles, string $backup): array
-    {
+    private function extract(
+        string $archive,
+        string $stage,
+        ?array &$delta,
+        array $oldFiles,
+        string $backup,
+        ?array $targetFiles = null
+    ): array {
         $zip = new ZipArchive();
         if ($zip->open($archive, ZipArchive::CHECKCONS) !== true) {
             throw new RuntimeException('Package is not a valid ZIP archive');
@@ -392,7 +417,43 @@ final class Installer
             if (!$entries && $delta === null) {
                 throw new RuntimeException('Archive contains no installable files');
             }
-            $this->preflight($entries, $oldFiles, $delta, $backup, $total);
+            // Audit every ZIP entry even when its payload will not be extracted.
+            $packageFiles = [];
+            $unchanged = 0;
+            $declared = $delta['files'] ?? $targetFiles;
+            if ($declared !== null) {
+                foreach ($declared as $path => $file) {
+                    if ($this->protected((string) $path)) {
+                        continue;
+                    }
+                    if (!isset($entries[$path]) || $entries[$path]['size'] !== $file['size']
+                        || (($entries[$path]['mode'] & 0111) ? 0755 : 0644) !== $file['mode']) {
+                        throw new RuntimeException('Archive differs from declared file: ' . $path);
+                    }
+                    $packageFiles[$path] = $file;
+                }
+                if (count($packageFiles) !== count($entries)) {
+                    throw new RuntimeException('Archive contains undeclared files');
+                }
+            }
+            unset($seen, $spellings);
+            $this->checkpoint('archive_scan');
+            $deleted = $delta === null ? array_keys(array_diff_key($oldFiles, $entries)) : $delta['deleted'];
+            if ($declared !== null) {
+                $parents = [];
+                foreach ($entries as $path => $entry) {
+                    $target = Files::target($this->root, (string) $path, $parents);
+                    $file = $packageFiles[$path];
+                    if (is_file($target) && filesize($target) === $file['size']
+                        && hash_equals($file['sha256'], hash_file('sha256', $target))) {
+                        unset($entries[$path]);
+                        $unchanged++;
+                    }
+                }
+            }
+            $this->checkpoint('local_compare');
+            $this->preflight($entries, $oldFiles, $deleted, $backup, array_sum(array_column($entries, 'size')));
+            $this->checkpoint('preflight');
             // The whitelist contains files only. extractTo keeps one archive handle open.
             // Bound each batch and verify its actual output before extracting the next batch.
             foreach (array_chunk(array_keys($entries), 256) as $paths) {
@@ -418,13 +479,18 @@ final class Installer
                     if ($hashes['crc32b'] !== $entry['crc']) {
                         throw new RuntimeException('ZIP entry failed CRC validation: ' . $path);
                     }
-                    if ($delta !== null && !hash_equals($delta['files'][$path]['sha256'], $hashes['sha256'])) {
-                        throw new RuntimeException('Delta file SHA-256 mismatch: ' . $path);
+                    if ($declared !== null && !hash_equals($packageFiles[$path]['sha256'], $hashes['sha256'])) {
+                        throw new RuntimeException('Manifest file SHA-256 mismatch: ' . $path);
                     }
                     $entries[$path]['sha256'] = $hashes['sha256'];
+                    if ($declared === null) {
+                        $packageFiles[$path] = ['size' => $entry['size'], 'sha256' => $hashes['sha256'],
+                            'mode' => ($entry['mode'] & 0111) ? 0755 : 0644];
+                    }
                 }
             }
-            return $entries;
+            $this->checkpoint('extract_verify');
+            return [$entries, $packageFiles, $unchanged];
         } finally {
             $zip->close();
         }
@@ -457,9 +523,8 @@ final class Installer
     }
 
     /** Check conservative space and write/read prerequisites before expanding any application file. */
-    private function preflight(array $entries, array $oldFiles, ?array $delta, string $backup, int $expandedBytes): void
+    private function preflight(array $entries, array $oldFiles, array $deleted, string $backup, int $expandedBytes): void
     {
-        $deleted = $delta === null ? array_keys(array_diff_key($oldFiles, $entries)) : $delta['deleted'];
         $paths = array_fill_keys(array_keys($entries), true);
         foreach ($deleted as $path) {
             if (isset($oldFiles[$path]) && !$this->protected((string) $path)) {
@@ -514,6 +579,13 @@ final class Installer
         if (!@unlink($probe)) {
             throw new RuntimeException('Cannot remove update files in directory: ' . $path);
         }
+    }
+
+    private function checkpoint(string $phase): void
+    {
+        $now = microtime(true);
+        $this->timings[$phase] = round($now - ($this->clock ?? $now), 6);
+        $this->clock = $now;
     }
 
     /** One disk read feeds both checks; reuse SHA-256 for manifest and unchanged-file detection. */

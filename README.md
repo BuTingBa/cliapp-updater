@@ -16,7 +16,7 @@
 
 ```bash
 composer config allow-plugins.buting/cliapp-updater true
-composer require buting/cliapp-updater:^2.0
+composer require buting/cliapp-updater:^2.1
 ```
 
 安装后自动在**使用本包的项目根目录**创建 `.updater/` 和 `updater.php`，配置已关联这两个路径。填写 `updater.php` 中的中心地址、产品 Code、产品密钥和当前版本序号后即可使用。安装过程不联网检查业务更新、不安装应用版本、不生成授权。
@@ -304,6 +304,7 @@ Linux 读取 `/etc/machine-id`，备选 `/var/lib/dbus/machine-id`；Windows 查
 | `sha256` | string | ZIP 的 64 位小写十六进制 SHA-256 |
 | `file_url` | string | 中心返回的受控相对下载票据路径 |
 | `requirements` | string | 运行要求文本；库不自动解析或执行 |
+| `config` | string\|null，可缺省 | 中心完整包的扩展参数 JSON 对象原文；用 `Updater::packageConfig($release)` 解码 |
 | `manifest_state` | string | 清单状态；`ready` 时可读取 |
 | `manifest_url` | string\|null | 受控清单票据路径 |
 | `manifest_sha256` | string | 清单原始 JSON 字节的 SHA-256 |
@@ -373,7 +374,7 @@ if ($release['update'] && ($release['package']['manifest_state'] ?? '') === 'rea
 
 ### `update(array $hooks = []): ?array`
 
-同步完成：取锁 → 检查授权与版本 → 选择完整/增量包 → 下载校验 → ZIP 目录表审核与目标权限预检 → 批量解压与清单核验 → 比较本地文件 → 备份变更及恢复计划落盘 → 覆盖/删除 → 提交版本和文件基准 → 返回。
+同步完成：取锁 → 检查授权与版本 → 选择完整/增量包并读取就绪清单 → 下载校验 → 审核完整 ZIP 目录表 → 根据清单比较本地文件 → 对变更路径预检 → 仅解压变化文件并校验 → 备份变更及恢复计划落盘 → 替换/删除 → 提交版本和文件基准 → 返回。旧中心没有就绪清单时，先解压校验再比较本地内容。
 
 `hooks` 是可选回调数组，详见后文。无更新返回 `null`，不运行安装回调。成功返回版本摘要字段以及：
 
@@ -385,6 +386,23 @@ if ($release['update'] && ($release['package']['manifest_state'] ?? '') === 'rea
 | `updated_files` | int | 本次实际新增或替换的文件数量 |
 | `unchanged_files` | int | 包内可安装文件中，与本地大小和 SHA-256 相同而跳过的数量；增量包未携带的文件不计入 |
 | `deleted_files` | int | 本次实际执行废弃清理的文件数量 |
+| `extracted_files` | int | 实际解压的应用文件数量，不含增量 `update.json`；有清单时未变化文件不解压 |
+| `config` | array | 目标完整包扩展参数的解析结果，与 `Updater::packageConfig($release)` 相同 |
+| `timings` | array<string, float> | 安装阶段耗时，单位秒；各值为独立时长，不是累计值，详见下表 |
+
+`timings` 不含中心检查、增量选择、清单下载、ZIP 下载及下载文件清理；仅在安装成功时返回，不是实时进度接口。
+
+| 阶段 | 包含工作 |
+| --- | --- |
+| `baseline` | 初始化暂存/备份目录、读取旧状态、安装前增量基准复核、清单格式校验 |
+| `archive_scan` | ZIP 目录表、增量元数据、路径类型、数量大小与声明文件核对 |
+| `local_compare` | 有清单时读取本地文件并比较大小、SHA-256 |
+| `preflight` | 变更目标和备份条件、父目录写入探测、空间检查 |
+| `extract_verify` | 选择性批量解压、实际大小、CRC 和 SHA-256 核验 |
+| `plan_backup` | 生成完整基准、废弃清理判断、目标清单核对、备份和恢复记录；无清单时的本地比较也计入此项 |
+| `apply` | `before_apply`、文件替换/删除、`after_apply` |
+| `commit_cleanup` | 写入版本状态及事务完成状态、清理暂存目录 |
+| `after_commit` | 提交后的应用回调 |
 
 返回的 `update=true` 是本次安装的版本摘要，不表示还有下一个版本。安装失败会尝试恢复文件和版本；提交后回调失败不撤销已提交结果，见错误处理。
 
@@ -399,6 +417,48 @@ if ($release['update'] && ($release['package']['manifest_state'] ?? '') === 'rea
 静态字段筛选方法，返回输入中存在的 `update`、`installed`、`status_code`、`version`、`version_code`、`changelog`、`published_at`，并添加布尔 `force_update`（严格等于 `true` 才为真）和 `requirements`（取自 `package.requirements`，缺省 `''`）。
 
 不包含凭证、票据、包详情或本地备份路径。不验证输入，不取锁；结果用于展示，不能再传给 `download()` 或 `manifest()`。
+
+### `Updater::packageConfig(array $release): array`
+
+从 `check()` 完整响应的 `package.config` 解析中心扩展参数。静态方法，不联网、不取锁、不安装。无更新、字段缺省、`null`、空字符串或空对象 `{}` 返回 `[]`；非对象 JSON、非法 JSON 或非字符串值抛 `RuntimeException`。
+
+中心发布版本时，在完整包的扩展配置中填写 JSON 对象，例如：
+
+```json
+{"migration_required": true, "schema_version": 12, "notice": "升级后请刷新缓存"}
+```
+
+```php
+// 已完成权限校验和维护准备；check() 可能同步安装强制版本。
+$release = $updater->check();
+$parameters = Updater::packageConfig($release);
+$schemaVersion = $parameters['schema_version'] ?? null;
+
+// 按业务需要读取字段，验证类型；仅将允许公开的字段交给前端。
+$notice = is_string($parameters['notice'] ?? null) ? $parameters['notice'] : '';
+```
+
+JSON 对象递归转换为关联数组，JSON 数组、布尔、数字和 `null` 按 PHP JSON 解码规则保留；需要无损表达的大整数应由中心写为字符串。该方法只校验外层对象，业务字段及其类型由调用者定义和验证。
+
+`update()` 的返回值、强制安装的 `check()['installation']` 及安装回调参数均包含解析后的 `config`。无更新时 `update()` 仍返回 `null`。增量安装使用目标**完整包**的配置，不使用增量容器的配置。
+
+```php
+$result = $updater->update([
+    'after_apply' => static function (array $release): void {
+        $parameters = $release['config'];
+        if (($parameters['migration_required'] ?? false) === true) {
+            // 调用应用自己的迁移入口；迁移的事务和失败恢复由应用管理。
+        }
+    },
+]);
+if ($result !== null) {
+    $parameters = $result['config'];
+}
+```
+
+扩展参数只作为数据传递，不自动执行命令、脚本或迁移，不覆盖本地 `updater.php`、排除规则或更新器配置。`summary()` 不包含扩展参数；不要把整个 `config` 默认写入日志或返回浏览器。
+
+扩展参数随本次事务记录保存，显式回滚的回调收到的是**被回滚事务的目标版本配置**，不是旧版本配置；旧版本产生的事务可能没有 `config`，恢复回调可用 `$release['config'] ?? []`。`status()` 不提供远程配置缓存，也不会重新向中心读取扩展参数。
 
 ## 完整包、增量包与文件保护
 
@@ -433,19 +493,23 @@ ZIP 文件名使用 UTF-8，支持中文与纯数字文件名。拒绝路径穿�
 
 ### 大量文件与预检
 
-先读取并校验整个 ZIP 目录表，检查目标路径、旧文件可读性、目标父目录创建/删除临时文件的能力及备份空间，再解压应用文件。缺失的目录检查最近的已存在父目录；错误包含具体路径。预检不改变应用内容，会在目录内短暂创建并删除空探测文件。它不能保证之后权限、磁盘空间或文件没有变化，因此实际写入仍校验并保留恢复机制。
+先读取并校验整个 ZIP 目录表。有就绪清单时，核对包内路径、大小和安全权限，再按本地大小与 SHA-256 筛选变化文件。仅对变化目标及候选废弃路径检查旧文件可读性、目标父目录创建/删除临时文件的能力及备份空间，再解压应用文件。缺失的目录检查最近的已存在父目录；错误包含具体路径。预检不改变应用内容，会在目录内短暂创建并删除空探测文件。它不能保证之后权限、磁盘空间或文件没有变化，因此实际写入仍校验并保留恢复机制。
 
 允许安装的条目按每批 256 个交给原生 `extractTo()`，不对每个条目重新打开 ZIP。Windows 非 ASCII 路径使用同一 ZIP 句柄隔离提取后移到已校验的位置，避免部分 PHP 构建丢失中文目录。每批解压后核对实际大小；一次文件读取同时计算 CRC 和 SHA-256，后者复用于增量校验、安装清单和变更比较。原文件权限由安装器显式保留，新文件使用包声明的安全权限（0644/0755）；不依赖原生解压恢复权限。
 
-全量包仍须解压并核验，内容相同仅跳过后续备份与替换。即使所有文件相同，也运行安装回调、提交新版本，并可回滚版本状态。回滚不触碰跳过的文件。预检空间按候选文件的完整展开量和旧文件备份上限保守估算，内容比较后不会自动降低预检要求。
+完整包 `manifest_state=ready` 时自动获取并核验清单；没有就绪清单时兼容原流程，全部解压后再跳过内容相同的文件。清单已就绪但下载或校验失败时停止安装，不静默降级。整个 ZIP 的下载哈希、完整目录表和资源限制仍检查；仅解压文件执行展开后的 CRC 与 SHA-256 校验。清单相同的本地文件仍读取内容校验，不单凭修改时间判断。
 
-可用 `php tests/performance.php 30000 fresh`、`identical`、`changed` 测量首次安装、内容全同和 1% 内容变化。每个场景用独立进程运行，自动清理测试目录；生成包和准备旧文件不计入安装耗时，下载网络耗时也不计入。测试源码可从 GitHub 获取。
+同一文件系统内优先将校验后的暂存文件移动到目标位置，避免复制一次新文件内容；跨文件系统或移动失败时回退为目标目录中的临时文件复制后替换。不会先删除目标再尝试替换。已有文件仍先备份，恢复记录在任何应用文件变更前写入；移动失败、回调失败和中断恢复共用原事务机制。
+
+即使所有文件相同，也下载并校验 ZIP、运行安装回调、提交新版本，并可回滚版本状态；有清单时解压数量为零。回滚不触碰跳过的文件。预检展开空间按实际待解压文件计算，另保留候选旧文件备份空间和安全余量；包的最大展开限制仍按整个 ZIP 审核。安装期间应暂停应用代码写入；更新锁仅协调本库操作，不能阻止其他部署程序改文件。
+
+可用 `php tests/performance.php 30000 fresh`、`identical`、`changed`、`changed10`、`changed100` 测量首次安装、内容全同及 1%/10%/100% 内容变化。默认提供目标清单；测试旧中心兼容路径可用 `php tests/performance.php 30000 changed autoload.php legacy`（在包根目录执行）。每个场景用独立进程运行，自动清理测试目录；生成包、准备旧文件和清单不计入安装耗时，下载网络耗时也不计入。测试源码可从 GitHub 获取。
 
 测量环境、旧版对比和文件数量验证见 [性能验证记录](PERFORMANCE.md)。
 
 ## 回调
 
-`check($hooks)`、`update($hooks)`、`rollback($hooks)` 接受 `array<string, callable>`。默认读取配置的 `hooks`，方法参数按名称覆盖默认回调，未覆盖的保留。每个回调接收一个 `array $release` 版本摘要；返回 `false` 或抛异常视为失败，其他返回值（含无返回值）视为成功。
+`check($hooks)`、`update($hooks)`、`rollback($hooks)` 接受 `array<string, callable>`。默认读取配置的 `hooks`，方法参数按名称覆盖默认回调，未覆盖的保留。每个回调接收一个 `array $release`，包含版本摘要及解析后的 `config` 扩展参数；返回 `false` 或抛异常视为失败，其他返回值（含无返回值）视为成功。
 
 | 名称 | 所属操作 | 调用时机 |
 | --- | --- | --- |
@@ -483,7 +547,7 @@ if (session_status() === PHP_SESSION_ACTIVE) {
 
 $result = $updater->update($hooks);
 if ($result !== null) {
-    unset($result['backup_dir']);
+    unset($result['backup_dir'], $result['config']); // 业务扩展参数按字段选择是否公开。
 }
 return json(['updated' => $result !== null, 'release' => $result]);
 ```
@@ -601,7 +665,7 @@ php vendor/bin/cli-app-updater rollback /srv/shop/updater.php
 - [examples/config.php](examples/config.php)：共享配置及注释。
 - [examples/updater.php](examples/updater.php)：精简检查示例。
 - [examples/demo.php](examples/demo.php)：完整命令演示与回调。
-- [examples/http.php](examples/http.php)：控制器处理函数，支持 `client-key/status/check/changelog/manifest/update/rollback`。安装返回 `updated` 和 `release`，去掉本地备份路径；恢复返回 `rolled_back`。
+- [examples/http.php](examples/http.php)：控制器处理函数，支持 `client-key/status/check/changelog/manifest/update/rollback`。安装返回 `updated` 和 `release`，去掉本地备份路径及业务扩展参数；恢复返回 `rolled_back`。
 
 示例使用占位配置，接入时配置实际中心和项目目录。`Files`、`HttpClient`、`Installer`、`Manifest`、`Json`、`ClientIdentity` 是内部辅助类，不属于应用集成 API。
 

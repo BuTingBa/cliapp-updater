@@ -80,7 +80,8 @@ try {
     buildFixture($upload['file_url'], $directory . '/tasks');
     (new Release())->save($uid, [
         'product_id' => $productId, 'version' => '1.0.0', 'version_code' => 1, 'state' => 1, 'force_update' => 1,
-        'packages' => [$upload + ['platform' => 'php', 'requirements' => 'PHP >= 7.4']],
+        'packages' => [array_replace($upload, ['platform' => 'php', 'requirements' => 'PHP >= 7.4',
+            'config' => '{"migration_required":true,"schema_version":2}'])],
     ]);
     $socket = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
     $address = stream_socket_get_name($socket, false);
@@ -126,6 +127,8 @@ try {
     verify($updater->authorize()['authorized'], 'Online license validates through real API');
     $release = $updater->check();
     verify($release['installed'] && $updater->status()['version_code'] === 1, 'Real forced check installs immediately');
+    verify(Updater::packageConfig($release)['migration_required'] === true && Updater::packageConfig($release)['schema_version'] === 2
+        && $release['installation']['config'] === Updater::packageConfig($release), 'Real center extensions survive forced installation');
     $updater->rollback();
     verify($release['force_update'] === true && Updater::summary($release)['force_update'] === true, 'Real forced-update flag reaches client summary');
     verify($release['update'] && $release['package']['platform'] === 'php', 'Real API response matches package contract');

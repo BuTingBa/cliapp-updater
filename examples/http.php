@@ -28,7 +28,7 @@ return static function (Updater $updater, string $action, array $hooks = []): ar
             if ($result === null) {
                 return ['updated' => false];
             }
-            unset($result['backup_dir']); // 本地备份路径留给服务端运维。
+            unset($result['backup_dir'], $result['config']); // 扩展参数按业务字段选择是否公开。
             return ['updated' => true, 'release' => $result];
         case 'rollback':
             $updater->rollback($hooks);

@@ -73,4 +73,57 @@ use BuTing\CliAppUpdater\Installer;
         $extract->invokeArgs($installer, [$archive, $stage, &$delta, [], $backup]);
     }, 'Existing target parent conflict fails before extraction');
     expect(strpos($error->getMessage(), '/blocked') !== false && count(scandir($stage)) === 2, 'Preflight reports concrete target and leaves staging empty');
+
+    // Full manifest: compare before extraction, including same-size local modifications.
+    $zip->open($archive, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    $targetFiles = [];
+    foreach (['same.php' => 'same', 'change.php' => 'new', 'new.php' => 'new'] as $path => $content) {
+        $zip->addFromString($path, $content);
+        $targetFiles[$path] = ['size' => strlen($content), 'sha256' => hash('sha256', $content), 'mode' => 0644];
+    }
+    $zip->close();
+    $inspect = static function () use ($work): void {
+        $stages = array_filter(glob($work . '/stage-*'), 'is_dir');
+        expect(count($stages) === 1, 'One private staging directory per install');
+        $stage = reset($stages);
+        expect(!file_exists($stage . '/same.php') && is_file($stage . '/change.php') && is_file($stage . '/new.php'),
+            'Manifest match skips extraction; same-size changes are staged');
+    };
+    $result = $installer->install($archive, [], ['version_code' => 2], ['before_apply' => $inspect], null, $targetFiles);
+    expect($result['extracted_files'] === 2 && $result['unchanged_files'] === 1 && $result['deleted_files'] === 1,
+        'Selective extraction retains full manifest and obsolete cleanup');
+    expect(isset($result['timings']['local_compare'], $result['timings']['extract_verify'], $result['timings']['commit_cleanup']),
+        'Installation reports separate phase durations');
+    $installer->rollback();
+    expect(file_get_contents($root . '/change.php') === 'old' && is_file($root . '/obsolete.php') && !is_file($root . '/new.php'),
+        'Moved staging files remain fully recoverable');
+    rejects(static function () use ($installer, $archive, $inspect, $targetFiles): void {
+        $installer->install($archive, [], ['version_code' => 2], ['before_apply' => $inspect,
+            'after_apply' => static function (): bool { return false; }], null, $targetFiles);
+    }, 'Selective installation automatically recovers after moved-file failure');
+    expect(file_get_contents($root . '/change.php') === 'old' && is_file($root . '/obsolete.php'), 'Automatic rollback restores selective transaction');
+    foreach (['missing', 'extra', 'size', 'mode', 'hash'] as $fault) {
+        $bad = $targetFiles;
+        if ($fault === 'missing') { unset($bad['new.php']); }
+        if ($fault === 'extra') { $bad['absent.php'] = $bad['new.php']; }
+        if ($fault === 'size') { $bad['new.php']['size']++; }
+        if ($fault === 'mode') { $bad['new.php']['mode'] = 0755; }
+        if ($fault === 'hash') { $bad['new.php']['sha256'] = str_repeat('0', 64); }
+        rejects(static function () use ($installer, $archive, $bad): void {
+            $installer->install($archive, [], ['version_code' => 2], [], null, $bad);
+        }, 'Reject inconsistent full manifest: ' . $fault);
+        expect(file_get_contents($root . '/change.php') === 'old', 'Invalid manifest never changes application content');
+    }
+    Files::write($root . '/change.php', 'new');
+    Files::write($root . '/new.php', 'new');
+    $result = $installer->install($archive, [], ['version_code' => 2], [], null, $targetFiles);
+    expect($result['extracted_files'] === 0 && $result['unchanged_files'] === 3 && $result['updated_files'] === 0,
+        'Identical manifest produces zero extracted or rewritten files');
+    expect(count(Files::json($work . '/state.json')['installed_files']) === 3, 'Skipped payloads still establish complete baseline');
+    $source = $work . '/verified-source';
+    $destination = $root . '/move-target';
+    Files::write($source, 'verified');
+    Files::write($destination, 'previous');
+    Files::install($source, $destination, 0644);
+    expect(!file_exists($source) && file_get_contents($destination) === 'verified', 'Same-device installation moves instead of copying staged contents');
 })($directory);
