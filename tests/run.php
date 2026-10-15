@@ -437,6 +437,7 @@ try {
         && $call('status')['data']['version_code'] === 0, 'Failed HTTP health hook restores files and version');
     $call('unsupported', 500);
 
+    require __DIR__ . '/installation.php';
     require __DIR__ . '/defaults.php';
     require __DIR__ . '/delta.php';
 

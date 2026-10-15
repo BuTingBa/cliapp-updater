@@ -203,6 +203,8 @@ final class Updater
                 'base_sha256' => $baseSha256, 'target_sha256' => $package['sha256'],
                 'target_manifest_sha256' => $package['manifest_sha256'],
             ];
+            // Installer reads the old baseline for recovery and builds the new one; do not retain a third copy.
+            unset($state['installed_files']);
             return $this->installer->install($archive, self::summary($release), $state, $hooks, $context, $targetFiles)
                 + ['package_type' => $delta === null ? 1 : 2];
         } finally {

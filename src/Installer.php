@@ -83,11 +83,11 @@ final class Installer
             if ($delta !== null && !$this->matchesBase($previous, $delta['base_package_id'])) {
                 throw new RuntimeException('Delta baseline changed before installation; check for updates again');
             }
-            $entries = $this->extract($archive, $stage, $delta);
             $oldFiles = Manifest::files($previous['installed_files'] ?? [], $this->limits);
+            $entries = $this->extract($archive, $stage, $delta, $oldFiles, $backup);
             $files = $delta === null ? [] : $oldFiles;
             foreach ($entries as $path => $entry) {
-                $files[$path] = ['size' => $entry['size'], 'sha256' => hash_file('sha256', $stage . '/' . $path),
+                $files[$path] = ['size' => $entry['size'], 'sha256' => $entry['sha256'],
                     'mode' => ($entry['mode'] & 0111) ? 0755 : 0644];
             }
             $deleted = $delta === null ? array_keys(array_diff_key($oldFiles, $files)) : $delta['deleted'];
@@ -123,6 +123,16 @@ final class Installer
                     if ($file['size'] !== $files[$path]['size'] || $file['sha256'] !== $files[$path]['sha256'] || $file['mode'] !== $files[$path]['mode']) {
                         throw new RuntimeException('Delta result differs from target file: ' . $path);
                     }
+                }
+            }
+            $unchanged = 0;
+            foreach ($entries as $path => $entry) {
+                $target = Files::target($this->root, (string) $path);
+                // Existing permissions are intentionally preserved, including for unchanged files.
+                if (empty($entry['delete']) && is_file($target) && filesize($target) === $entry['size']
+                    && hash_equals($entry['sha256'], hash_file('sha256', $target))) {
+                    unset($entries[$path]);
+                    $unchanged++;
                 }
             }
             $createdDirectories = [];
@@ -178,7 +188,7 @@ final class Installer
                             throw new RuntimeException('Cannot delete obsolete file: ' . $relative);
                         }
                     } else {
-                        Files::copy($stage . '/' . $relative, $target, $entry['old_mode'] ?? $entry['mode']);
+                        Files::copy($stage . '/' . $entry['source'], $target, $entry['old_mode'] ?? $entry['mode']);
                     }
                 }
                 self::hook($hooks, 'after_apply', $release);
@@ -205,7 +215,10 @@ final class Installer
         } catch (\Throwable $error) {
             throw new RuntimeException('Update is installed, but after_commit failed; finish cache/process/maintenance handling manually', 0, $error);
         }
-        return $release + ['backup_dir' => $backup, 'retained_files' => $retained];
+        $deletedCount = count(array_filter($entries, static function (array $entry): bool { return !empty($entry['delete']); }));
+        return $release + ['backup_dir' => $backup, 'retained_files' => $retained, 'unchanged_files' => $unchanged,
+            'updated_files' => count($entries) - $deletedCount,
+            'deleted_files' => $deletedCount];
     }
 
     public function rollback(array $hooks = []): void
@@ -263,7 +276,7 @@ final class Installer
         self::hook($hooks, 'after_rollback', $transaction['release']);
     }
 
-    private function extract(string $archive, string $stage, ?array &$delta = null): array
+    private function extract(string $archive, string $stage, ?array &$delta, array $oldFiles, string $backup): array
     {
         $zip = new ZipArchive();
         if ($zip->open($archive, ZipArchive::CHECKCONS) !== true) {
@@ -379,39 +392,152 @@ final class Installer
             if (!$entries && $delta === null) {
                 throw new RuntimeException('Archive contains no installable files');
             }
-            $this->space($stage, $total);
-            foreach ($entries as $relative => $entry) {
-                $relative = (string) $relative;
-                $target = $stage . '/' . $relative;
-                Files::directory(dirname($target));
-                $input = $zip->getStream($entry['source']);
-                $output = fopen($target, 'xb');
-                if ($input === false || $output === false) {
-                    if (is_resource($input)) {
-                        fclose($input);
+            $this->preflight($entries, $oldFiles, $delta, $backup, $total);
+            // The whitelist contains files only. extractTo keeps one archive handle open.
+            // Bound each batch and verify its actual output before extracting the next batch.
+            foreach (array_chunk(array_keys($entries), 256) as $paths) {
+                $sources = [];
+                foreach ($paths as $path) {
+                    $source = $entries[$path]['source'];
+                    if (PHP_OS_FAMILY === 'Windows' && preg_match('/[^\x00-\x7f]/', $source)) {
+                        $this->extractUnicode($zip, $stage, $source);
+                    } else {
+                        $sources[] = $source;
                     }
-                    if (is_resource($output)) {
-                        fclose($output);
+                }
+                if ($sources && !@$zip->extractTo($stage, $sources)) {
+                    throw new RuntimeException('Cannot extract ZIP batch: ' . $zip->getStatusString());
+                }
+                foreach ($paths as $path) {
+                    $entry = $entries[$path];
+                    $target = $stage . '/' . $entry['source'];
+                    if (!is_file($target) || filesize($target) !== $entry['size']) {
+                        throw new RuntimeException('ZIP entry failed size validation: ' . $path);
                     }
-                    throw new RuntimeException('Cannot extract ZIP entry');
-                }
-                try {
-                    $written = stream_copy_to_stream($input, $output, $entry['size'] + 1);
-                } finally {
-                    fclose($input);
-                    fclose($output);
-                }
-                if ($written !== $entry['size'] || hash_file('crc32b', $target) !== $entry['crc']) {
-                    throw new RuntimeException('ZIP entry failed size or CRC validation');
-                }
-                if ($delta !== null && !hash_equals($delta['files'][$relative]['sha256'], hash_file('sha256', $target))) {
-                    throw new RuntimeException('Delta file SHA-256 mismatch');
+                    $hashes = $this->hashes($target);
+                    if ($hashes['crc32b'] !== $entry['crc']) {
+                        throw new RuntimeException('ZIP entry failed CRC validation: ' . $path);
+                    }
+                    if ($delta !== null && !hash_equals($delta['files'][$path]['sha256'], $hashes['sha256'])) {
+                        throw new RuntimeException('Delta file SHA-256 mismatch: ' . $path);
+                    }
+                    $entries[$path]['sha256'] = $hashes['sha256'];
                 }
             }
             return $entries;
         } finally {
             $zip->close();
         }
+    }
+
+    /** Some Windows builds flatten UTF-8 directory names. Isolate native output before moving it. */
+    private function extractUnicode(ZipArchive $zip, string $stage, string $source): void
+    {
+        $scratch = Files::directory($stage . '/.entry-' . bin2hex(random_bytes(8)));
+        try {
+            if (!@$zip->extractTo($scratch, [$source])) {
+                throw new RuntimeException('Cannot extract UTF-8 ZIP entry: ' . $source);
+            }
+            $files = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($scratch, \FilesystemIterator::SKIP_DOTS));
+            $extracted = null;
+            foreach ($files as $file) {
+                if ($extracted !== null || !$file->isFile() || $file->isLink()) {
+                    throw new RuntimeException('Unexpected native ZIP extraction result: ' . $source);
+                }
+                $extracted = $file->getPathname();
+            }
+            $target = $stage . '/' . $source;
+            Files::directory(dirname($target));
+            if ($extracted === null || !rename($extracted, $target)) {
+                throw new RuntimeException('Cannot stage UTF-8 ZIP entry: ' . $source);
+            }
+        } finally {
+            Files::removeTree($scratch);
+        }
+    }
+
+    /** Check conservative space and write/read prerequisites before expanding any application file. */
+    private function preflight(array $entries, array $oldFiles, ?array $delta, string $backup, int $expandedBytes): void
+    {
+        $deleted = $delta === null ? array_keys(array_diff_key($oldFiles, $entries)) : $delta['deleted'];
+        $paths = array_fill_keys(array_keys($entries), true);
+        foreach ($deleted as $path) {
+            if (isset($oldFiles[$path]) && !$this->protected((string) $path)) {
+                $paths[$path] = true;
+            }
+        }
+        $checked = [];
+        $backupBytes = 0;
+        $this->probeDirectory($this->work);
+        $this->probeDirectory($backup);
+        foreach ($paths as $relative => $unused) {
+            $target = Files::target($this->root, (string) $relative);
+            if (!isset($entries[$relative]) && !is_file($target)) {
+                continue; // Locally replaced obsolete paths are retained, not deletion targets.
+            }
+            if (file_exists($target)) {
+                if (!is_file($target)) {
+                    throw new RuntimeException('A directory conflicts with an update file: ' . $target);
+                }
+                if (!is_readable($target) || (PHP_OS_FAMILY === 'Windows' && !is_writable($target))) {
+                    throw new RuntimeException('Cannot read or replace update target: ' . $target);
+                }
+                $backupBytes += filesize($target);
+            }
+            $parent = dirname($target);
+            while (!is_dir($parent)) {
+                if (file_exists($parent)) {
+                    throw new RuntimeException('A file conflicts with an update directory: ' . $parent);
+                }
+                $parent = dirname($parent);
+            }
+            if (!isset($checked[$parent])) {
+                $this->probeDirectory($parent);
+                $checked[$parent] = true;
+            }
+        }
+        $this->space($this->work, $expandedBytes + $backupBytes);
+        $this->space($this->root, $expandedBytes);
+    }
+
+    private function probeDirectory(string $path): void
+    {
+        if (!is_writable($path)) {
+            throw new RuntimeException('Update directory is not writable: ' . $path);
+        }
+        $probe = $path . '/.updater-probe-' . bin2hex(random_bytes(8));
+        $handle = @fopen($probe, 'xb');
+        if ($handle === false) {
+            throw new RuntimeException('Cannot create update files in directory: ' . $path);
+        }
+        fclose($handle);
+        if (!@unlink($probe)) {
+            throw new RuntimeException('Cannot remove update files in directory: ' . $path);
+        }
+    }
+
+    /** One disk read feeds both checks; reuse SHA-256 for manifest and unchanged-file detection. */
+    private function hashes(string $path): array
+    {
+        $input = fopen($path, 'rb');
+        if ($input === false) {
+            throw new RuntimeException('Cannot verify extracted file: ' . $path);
+        }
+        $sha = hash_init('sha256');
+        $crc = hash_init('crc32b');
+        try {
+            while (!feof($input)) {
+                $data = fread($input, 1048576);
+                if ($data === false || ($data === '' && !feof($input))) {
+                    throw new RuntimeException('Cannot read extracted file: ' . $path);
+                }
+                hash_update($sha, $data);
+                hash_update($crc, $data);
+            }
+        } finally {
+            fclose($input);
+        }
+        return ['sha256' => hash_final($sha), 'crc32b' => hash_final($crc)];
     }
 
     private function protected(string $relative): bool
