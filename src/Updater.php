@@ -374,10 +374,12 @@ final class Updater
     {
         $path = $this->work . '/state.json';
         $scope = hash('sha256', $this->config['product_code'] . "\n" . $this->root);
-        if (!is_file($path)) {
-            if (is_file($this->work . '/transaction.json')) {
-                throw new RuntimeException('State is missing; restore work_dir from backup before continuing');
-            }
+        $write = !is_file($path);
+        if (!$write) {
+            $state = Files::json($path);
+        } elseif (is_file($this->work . '/transaction.json')) {
+            $state = $this->installer->recoverState();
+        } else {
             $machine = $this->config['client_key'] === '' ? $this->machine() : null;
             $tag = $machine === null ? null : ClientIdentity::tag($machine, $scope);
             $state = [
@@ -389,9 +391,7 @@ final class Updater
             if ($tag !== null) {
                 $state['machine_tag'] = $tag;
             }
-            Files::writeJson($path, $state);
         }
-        $state = Files::json($path);
         if (!is_string($state['identity'] ?? null) || !preg_match('/^[a-f0-9]{64}$/D', $state['identity'])
             || (isset($state['installation_scope']) && $state['installation_scope'] !== $scope)
             || !preg_match('/^[A-Za-z0-9_-]{8,64}$/D', $state['client_key'] ?? '')
@@ -413,6 +413,9 @@ final class Updater
             $legacy = hash('sha256', rtrim($this->config['base_url'], '/') . "\n" . $this->config['product_code'] . "\n" . $this->root);
             $state['installation_scope'] = $scope;
             $state['package_origin'] = hash_equals($legacy, $state['identity']) ? $this->origin() : '';
+            $write = true;
+        }
+        if ($write) {
             Files::writeJson($path, $state);
         }
         return $state;

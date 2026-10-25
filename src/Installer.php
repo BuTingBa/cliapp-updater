@@ -56,6 +56,41 @@ final class Installer
         }
     }
 
+    /** Rebuild missing metadata from the journal; never infer that an unfinished apply succeeded. */
+    public function recoverState(): array
+    {
+        $transaction = $this->transaction();
+        if (!is_array($transaction['previous_state'] ?? null)) {
+            throw new RuntimeException('Recovery manifest has no previous installation state');
+        }
+        $state = $transaction['previous_state'];
+        if ($transaction['status'] === 'complete') {
+            $release = $transaction['release'] ?? [];
+            if (!is_string($release['version'] ?? null) || $release['version'] === ''
+                || !is_int($release['version_code'] ?? null)) {
+                throw new RuntimeException('Recovery manifest has no committed version');
+            }
+            $state['version'] = $release['version'];
+            $state['version_code'] = $release['version_code'];
+            // The journal tracks changed files only, so it cannot recreate the new package baseline.
+            unset($state['installed_files'], $state['package_id'], $state['package_sha256'],
+                $state['package_origin'], $state['updated_at']);
+        }
+        return $state;
+    }
+
+    private function transaction(): array
+    {
+        $transaction = Files::json($this->work . '/transaction.json');
+        if (($transaction['project_dir'] ?? '') !== $this->root
+            || !is_string($transaction['id'] ?? null)
+            || !preg_match('/^[0-9]{14}-[a-f0-9]{12}$/D', $transaction['id'])
+            || !in_array($transaction['status'] ?? '', ['applying', 'complete', 'rolling_back', 'rolled_back'], true)) {
+            throw new RuntimeException('Recovery manifest does not match this project or has an invalid status');
+        }
+        return $transaction;
+    }
+
     /** A delta is usable only when the recorded base is still present on disk. */
     public function matchesBase(array $state, int $packageId): bool
     {
@@ -246,10 +281,7 @@ final class Installer
         if (!is_file($path)) {
             throw new RuntimeException('No update is available for rollback');
         }
-        $transaction = Files::json($path);
-        if (($transaction['project_dir'] ?? '') !== $this->root || !preg_match('/^[0-9]{14}-[a-f0-9]{12}$/D', $transaction['id'] ?? '')) {
-            throw new RuntimeException('Recovery manifest does not match this project');
-        }
+        $transaction = $this->transaction();
         if ($transaction['status'] === 'rolled_back') {
             return;
         }
