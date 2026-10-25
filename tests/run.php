@@ -453,6 +453,7 @@ try {
     require __DIR__ . '/installation.php';
     require __DIR__ . '/defaults.php';
     require __DIR__ . '/delta.php';
+    require __DIR__ . '/compatibility.php';
 
     if (function_exists('sodium_crypto_sign_keypair')) {
         $pair = sodium_crypto_sign_keypair();

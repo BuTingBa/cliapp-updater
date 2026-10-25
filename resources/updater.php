@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 // 本文件由应用加载，不接受 HTTP 请求参数；填写中心地址、产品 Code 和产品密钥。
 return [
-    'base_url' => getenv('UPDATER_BASE_URL') ?: 'https://updates.example.com',
+    'base_url' => getenv('UPDATER_BASE_URL') ?: 'https://updates.example.com', // 可更换中心地址；保留原 .updater 状态。
     'product_code' => getenv('UPDATER_PRODUCT_CODE') ?: '',
     'product_key' => getenv('UPDATER_PRODUCT_KEY') ?: '',
     'project_dir' => __DIR__,

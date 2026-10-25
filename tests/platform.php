@@ -174,7 +174,7 @@ try {
     $zip->close();
     $nextUpload = (new Package())->upload($uid, new think\file\UploadedFile($nextArchive, 'next.zip', 'application/zip', null, true));
     buildFixture($nextUpload['file_url'], $directory . '/tasks');
-    (new Release())->save($uid, ['product_id' => $productId, 'version' => '1.1.0', 'version_code' => 2, 'state' => 1, 'force_update' => 1,
+    (new Release())->save($uid, ['product_id' => $productId, 'version' => '1.1.0', 'version_code' => 50, 'state' => 1, 'force_update' => 1,
         'delta_enabled' => 1, 'base_package_id' => $baseId, 'packages' => [$nextUpload + ['platform' => 'php']]]);
     buildFixture($nextUpload['file_url'], $directory . '/tasks');
     $next = $updater->check();
@@ -196,6 +196,20 @@ try {
     fclose($deltaPipes[2]);
     verify(proc_close($deltaCli) === 0 && $deltaErrors === '' && $deltaResult['package_type'] === 2, 'Real central delta installs through configured PHP CLI');
     $updater->rollback();
+    Files::write($root . '/assets/unchanged.bin', 'local edit');
+    $repaired = $updater->check();
+    verify($repaired['installation']['package_type'] === 1 && $updater->status()['version_code'] === 50
+        && file_get_contents($root . '/assets/unchanged.bin') === $unchanged, 'Real forced update repairs local drift and skips version gaps');
+    $updater->rollback();
+    verify(file_get_contents($root . '/assets/unchanged.bin') === 'local edit', 'Real full fallback rollback restores local edits');
+    Files::write($root . '/assets/unchanged.bin', $unchanged);
+    $moved = new Updater(array_replace($config, ['base_url' => str_replace('127.0.0.1', 'localhost', $config['base_url'])]));
+    verify($moved->getClientKey() === $localKey, 'Real API hostname change retains the licensed client key');
+    $migrated = $moved->check();
+    verify($migrated['installation']['package_type'] === 1 && $moved->status()['version_code'] === 50,
+        'Real new API hostname installs full package directly across version gaps');
+    $moved->rollback();
+    verify($moved->status()['version_code'] === 1 && $moved->getClientKey() === $localKey, 'Real URL migration supports version and identity rollback');
     Db::name('upgrade_license')->where('id', $license['id'])->update(['state' => 0]);
     try {
         $updater->download($release);

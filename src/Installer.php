@@ -88,7 +88,7 @@ final class Installer
         try {
             $previous = Files::json($this->work . '/state.json');
             if ($delta !== null && !$this->matchesBase($previous, $delta['base_package_id'])) {
-                throw new RuntimeException('Delta baseline changed before installation; check for updates again');
+                throw new DeltaUnavailable('Delta baseline changed before installation');
             }
             $oldFiles = Manifest::files($previous['installed_files'] ?? [], $this->limits);
             if ($targetFiles !== null) {
@@ -326,6 +326,9 @@ final class Installer
                 }
                 foreach (['base_sha256', 'target_sha256', 'target_manifest_sha256'] as $field) {
                     if (($document[$field] ?? null) !== $delta[$field]) {
+                        if ($field === 'base_sha256') {
+                            throw new DeltaUnavailable('Delta package uses a different baseline');
+                        }
                         throw new RuntimeException('Delta package identity mismatch: ' . $field);
                     }
                 }

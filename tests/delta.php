@@ -116,9 +116,14 @@ $result = (new Updater($deltaConfig + ['prefer_delta' => false]))->update();
 expect($result['package_type'] === 1, 'Caller can explicitly disable delta selection');
 $deltaUpdater->rollback();
 
-foreach (['base_hash', 'target_hash', 'manifest_hash', 'traversal', 'missing', 'extra', 'file_hash', 'duplicate_delete'] as $fault) {
+releaseFixture(20, $targetContents, $base, static function (array &$document): void {
+    $document['base_sha256'] = str_repeat('0', 64);
+});
+expect($deltaUpdater->update()['package_type'] === 1, 'Different delta baseline hash falls back to the verified full package');
+$deltaUpdater->rollback();
+
+foreach (['target_hash', 'manifest_hash', 'traversal', 'missing', 'extra', 'file_hash', 'duplicate_delete'] as $fault) {
     releaseFixture(20, $targetContents, $base, static function (array &$document, ZipArchive $zip) use ($fault): void {
-        if ($fault === 'base_hash') { $document['base_sha256'] = str_repeat('0', 64); }
         if ($fault === 'target_hash') { $document['target_sha256'] = str_repeat('0', 64); }
         if ($fault === 'manifest_hash') { $document['target_manifest_sha256'] = str_repeat('0', 64); }
         if ($fault === 'traversal') { $document['deleted'][] = '../outside'; }

@@ -38,7 +38,13 @@ if ($action === 'download' || strpos($path, '/api/packages/') === 0) {
         return;
     }
     $deltaId = $scenario['release']['delta_package']['id'] ?? null;
-    readfile($deltaId !== null && (int) ($_GET['package_id'] ?? 0) === $deltaId ? $directory . '/delta.zip' : $directory . '/package.zip');
+    $isDelta = $deltaId !== null && (int) ($_GET['package_id'] ?? 0) === $deltaId;
+    file_put_contents($directory . '/downloads.jsonl', json_encode(['delta' => $isDelta]) . "\n", FILE_APPEND);
+    if ($isDelta && $mode === 'edit_during_download') {
+        // Simulate an application write after selection but before the installer's baseline check.
+        file_put_contents($scenario['edit_path'], 'edited while downloading');
+    }
+    readfile($isDelta ? $directory . '/delta.zip' : $directory . '/package.zip');
     return;
 }
 header('Content-Type: application/json');

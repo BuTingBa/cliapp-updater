@@ -94,7 +94,7 @@ final class Updater
             $state = $this->state();
             $state['transaction_status'] = is_file($this->work . '/transaction.json')
                 ? (Files::json($this->work . '/transaction.json')['status'] ?? 'unknown') : 'none';
-            unset($state['identity'], $state['machine_tag'], $state['installed_files']);
+            unset($state['identity'], $state['machine_tag'], $state['installed_files'], $state['installation_scope'], $state['package_origin']);
             return $state;
         });
     }
@@ -190,28 +190,37 @@ final class Updater
         $package = $release['package'];
         $delta = $this->selectDelta($release, $state);
         $targetFiles = ($package['manifest_state'] ?? '') === 'ready' ? $this->readManifest($package)['files'] : null;
-        $archive = $this->downloadPackage(['package' => $delta ?? $package]);
-        try {
-            $baseSha256 = $state['package_sha256'] ?? '';
-            $state['version_code'] = $release['version_code'];
-            $state['version'] = $release['version'];
-            $state['updated_at'] = gmdate(DATE_ATOM);
-            $state['package_id'] = $package['id'] ?? 0;
-            $state['package_sha256'] = $package['sha256'];
-            $context = $delta === null ? null : [
-                'base_package_id' => $delta['base_package_id'], 'target_package_id' => $delta['target_package_id'],
-                'base_sha256' => $baseSha256, 'target_sha256' => $package['sha256'],
-                'target_manifest_sha256' => $package['manifest_sha256'],
-            ];
-            // Installer reads the old baseline for recovery and builds the new one; do not retain a third copy.
-            unset($state['installed_files']);
-            return $this->installer->install($archive, self::summary($release) + ['config' => self::packageConfig($release)], $state, $hooks, $context, $targetFiles)
-                + ['package_type' => $delta === null ? 1 : 2];
-        } finally {
-            if (is_file($archive)) {
-                unlink($archive);
+        $baseSha256 = $state['package_sha256'] ?? '';
+        $state['version_code'] = $release['version_code'];
+        $state['version'] = $release['version'];
+        $state['updated_at'] = gmdate(DATE_ATOM);
+        $state['package_id'] = $package['id'] ?? 0;
+        $state['package_sha256'] = $package['sha256'];
+        $state['package_origin'] = $this->origin();
+        // Installer reads the old baseline for recovery and builds the new one; do not retain a third copy.
+        unset($state['installed_files']);
+        // At most one fallback: a baseline mismatch may select full, never another delta.
+        do {
+            $archive = $this->downloadPackage(['package' => $delta ?? $package]);
+            try {
+                $context = $delta === null ? null : [
+                    'base_package_id' => $delta['base_package_id'], 'target_package_id' => $delta['target_package_id'],
+                    'base_sha256' => $baseSha256, 'target_sha256' => $package['sha256'],
+                    'target_manifest_sha256' => $package['manifest_sha256'],
+                ];
+                return $this->installer->install($archive, self::summary($release) + ['config' => self::packageConfig($release)], $state, $hooks, $context, $targetFiles)
+                    + ['package_type' => $delta === null ? 1 : 2];
+            } catch (DeltaUnavailable $error) {
+                if ($delta === null) {
+                    throw $error;
+                }
+                $delta = null;
+            } finally {
+                if (is_file($archive)) {
+                    unlink($archive);
+                }
             }
-        }
+        } while (true);
     }
 
     /** Restores the most recent transaction's files and version state, never the database. */
@@ -254,7 +263,7 @@ final class Updater
         $state = $this->state();
         $release = $this->request('check', false, [
             'supports_delta' => $this->config['prefer_delta'] ? 1 : 0,
-            'base_package_id' => $state['package_id'] ?? 0,
+            'base_package_id' => ($state['package_origin'] ?? '') === $this->origin() ? ($state['package_id'] ?? 0) : 0,
         ]);
         if (!isset($release['update']) || !is_bool($release['update'])) {
             throw new RuntimeException('Missing update flag');
@@ -265,8 +274,9 @@ final class Updater
         $release['force_update'] = $release['force_update'] ?? false;
         if ($release['update']) {
             $this->validateRelease($release);
-            if ($release['version_code'] <= $this->state()['version_code']) {
-                throw new RuntimeException('Server returned a non-increasing version');
+            if ($release['version_code'] <= $state['version_code']) {
+                throw new RuntimeException('Target version_code ' . $release['version_code']
+                    . ' must be greater than installed version_code ' . $state['version_code'] . '; version gaps are allowed');
             }
         }
         return $release;
@@ -299,7 +309,8 @@ final class Updater
     {
         $delta = $release['delta_package'] ?? null;
         $full = $release['package'];
-        if (!$this->config['prefer_delta'] || !is_array($delta) || ($full['manifest_state'] ?? '') !== 'ready'
+        if (!$this->config['prefer_delta'] || ($state['package_origin'] ?? '') !== $this->origin()
+            || !is_array($delta) || ($full['manifest_state'] ?? '') !== 'ready'
             || !is_int($delta['base_package_id'] ?? null) || !is_int($delta['target_package_id'] ?? null)
             || $delta['target_package_id'] !== ($full['id'] ?? 0)
             || !$this->installer->matchesBase($state, $delta['base_package_id'])) {
@@ -362,15 +373,15 @@ final class Updater
     private function state(): array
     {
         $path = $this->work . '/state.json';
-        $identity = hash('sha256', rtrim($this->config['base_url'], '/') . "\n" . $this->config['product_code'] . "\n" . $this->root);
+        $scope = hash('sha256', $this->config['product_code'] . "\n" . $this->root);
         if (!is_file($path)) {
             if (is_file($this->work . '/transaction.json')) {
                 throw new RuntimeException('State is missing; restore work_dir from backup before continuing');
             }
             $machine = $this->config['client_key'] === '' ? $this->machine() : null;
-            $tag = $machine === null ? null : ClientIdentity::tag($machine, $identity);
+            $tag = $machine === null ? null : ClientIdentity::tag($machine, $scope);
             $state = [
-                'identity' => $identity,
+                'identity' => $scope, 'installation_scope' => $scope,
                 'client_key' => $this->config['client_key'] ?: ($tag === null ? bin2hex(random_bytes(16)) : substr($tag, 0, 32)),
                 'client_key_source' => $this->config['client_key'] !== '' ? 'configured' : ($tag === null ? 'random' : 'machine'),
                 'version_code' => $this->config['version_code'],
@@ -381,20 +392,36 @@ final class Updater
             Files::writeJson($path, $state);
         }
         $state = Files::json($path);
-        if (($state['identity'] ?? '') !== $identity || !preg_match('/^[A-Za-z0-9_-]{8,64}$/D', $state['client_key'] ?? '')
+        if (!is_string($state['identity'] ?? null) || !preg_match('/^[a-f0-9]{64}$/D', $state['identity'])
+            || (isset($state['installation_scope']) && $state['installation_scope'] !== $scope)
+            || !preg_match('/^[A-Za-z0-9_-]{8,64}$/D', $state['client_key'] ?? '')
             || ($this->config['client_key'] !== '' && $this->config['client_key'] !== $state['client_key'])) {
             throw new RuntimeException('Installation state does not match product, directory or client_key');
         }
         self::version($state['version_code'] ?? null);
         if (isset($state['machine_tag'])) {
             $machine = $this->machine();
-            if ($machine !== null && !hash_equals($state['machine_tag'], ClientIdentity::tag($machine, $identity))) {
+            if ($machine !== null && !hash_equals($state['machine_tag'], ClientIdentity::tag($machine, $state['identity']))) {
                 throw new RuntimeException('State belongs to a different machine; use a new work_dir for a copied installation');
             }
         }
         // Existing random IDs remain valid; never silently invalidate already approved licenses.
         $state['client_key_source'] = $state['client_key_source'] ?? 'legacy';
+        if (!isset($state['installation_scope'])) {
+            // Old state stores only an opaque URL/product/path digest. Adopt trusted local state once,
+            // retaining its original machine seed and client_key even when the old URL is unavailable.
+            $legacy = hash('sha256', rtrim($this->config['base_url'], '/') . "\n" . $this->config['product_code'] . "\n" . $this->root);
+            $state['installation_scope'] = $scope;
+            $state['package_origin'] = hash_equals($legacy, $state['identity']) ? $this->origin() : '';
+            Files::writeJson($path, $state);
+        }
         return $state;
+    }
+
+    /** Package IDs belong to a center; installation identity does not. */
+    private function origin(): string
+    {
+        return hash('sha256', rtrim($this->config['base_url'], '/'));
     }
 
     private function machine(): ?string
